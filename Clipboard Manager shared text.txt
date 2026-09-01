@@ -1,0 +1,590 @@
+'use strict';
+
+const logger = require('./core/logger');
+const context = require('./core/agent-context');
+
+const state = require('./core/state');
+const eventBus = require('./core/event-bus');
+
+const memoryManager = require('./memory/memory-manager');
+
+const aiBrain = require('./ai/ai-brain');
+const brain = require('./ai/brain');
+const decisionEngine = require('./ai/decision-engine');
+
+const actionEngine = require('./actions/action-engine');
+
+const buildEngine = require('./build/build-engine');
+const combatEngine = require('./combat/combat-engine');
+
+const commandRouter = require('./commands/command-router');
+
+const movementEngine = require('./movement/movement-engine');
+const pathfinder = require('./movement/pathfinder');
+
+const eventObserver = require('./observer/event-observer');
+const playerTracker = require('./observer/player-tracker');
+
+const bedrockAdapter = require('./minecraft/bedrock-adapter');
+const minecraftClient = require('./minecraft/client');
+const worldScanner = require('./minecraft/world-scanner');
+
+const telegramGateway =
+    require('./communication/telegram-gateway');
+
+const githubGateway =
+    require('./communication/github-gateway');
+
+const notificationManager =
+    require('./communication/notification-manager');
+
+const messageGateway =
+    require('./communication/message-gateway');
+
+const secretManager =
+    require('./security/secret-manager');
+
+const VERSION =
+    '1.0.0';
+
+let started = false;
+let shuttingDown = false;
+
+const services = [
+    secretManager,
+
+    state,
+    eventBus,
+    memoryManager,
+
+    pathfinder,
+    movementEngine,
+
+    actionEngine,
+
+    buildEngine,
+    combatEngine,
+
+    worldScanner,
+    playerTracker,
+    eventObserver,
+
+    bedrockAdapter,
+    minecraftClient,
+
+    aiBrain,
+    brain,
+    decisionEngine,
+
+    commandRouter,
+
+    messageGateway,
+    notificationManager,
+
+    telegramGateway,
+    githubGateway
+];
+
+function serviceName(service) {
+
+    return (
+        service?.name ||
+        service?.constructor?.name ||
+        'unknown-service'
+    );
+}
+
+async function startService(service) {
+
+    if (
+        !service ||
+        typeof service.start !== 'function'
+    ) {
+        return {
+            success: true,
+            skipped: true
+        };
+    }
+
+    try {
+
+        const result =
+            await service.start();
+
+        return (
+            result || {
+                success: true
+            }
+        );
+
+    } catch (error) {
+
+        logger.error(
+            `${serviceName(service)} start xatosi: ${error.stack || error.message}`
+        );
+
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+async function stopService(service) {
+
+    if (
+        !service ||
+        typeof service.stop !== 'function'
+    ) {
+        return;
+    }
+
+    try {
+
+        await service.stop();
+
+    } catch (error) {
+
+        logger.warn(
+            `${serviceName(service)} stop xatosi: ${error.message}`
+        );
+    }
+}
+
+async function start() {
+
+    if (started) {
+
+        return {
+            success: true,
+            alreadyStarted: true
+        };
+    }
+
+    logger.info(
+        '=================================================='
+    );
+
+    logger.info(
+        `MINECRAFT AI AGENT v${VERSION}`
+    );
+
+    logger.info(
+        '=================================================='
+    );
+
+    logger.info(
+        'Agent ishga tushmoqda...'
+    );
+
+    /*
+     * 1. Context tekshiriladi.
+     */
+
+    if (
+        !context ||
+        typeof context.get !== 'function'
+    ) {
+
+        throw new Error(
+            'Agent Context mavjud emas.'
+        );
+    }
+
+    /*
+     * 2. Servislarni ketma-ket ishga tushiramiz.
+     *
+     * Muhim:
+     * Bitta ixtiyoriy servis ishlamasa,
+     * butun agentni yiqitmaymiz.
+     */
+
+    const results = [];
+
+    for (
+        const service of services
+    ) {
+
+        const name =
+            serviceName(service);
+
+        logger.info(
+            `[START] ${name}`
+        );
+
+        const result =
+            await startService(
+                service
+            );
+
+        results.push({
+            name,
+            result
+        });
+
+        if (
+            result?.success === false
+        ) {
+
+            logger.warn(
+                `[WARN] ${name} to‘liq ishga tushmadi.`
+            );
+
+        } else {
+
+            logger.info(
+                `[OK] ${name}`
+            );
+        }
+    }
+
+    /*
+     * 3. AI Agentni autonomous mode'ga
+     * avtomatik o'tkazmaymiz.
+     *
+     * Bu xavfsizlik uchun.
+     *
+     * Keyinchalik Telegram/command orqali:
+     *
+     * "avto o‘yna"
+     *
+     * deyilganda yoqiladi.
+     */
+
+    started = true;
+
+    /*
+     * 4. Global event.
+     */
+
+    if (
+        eventBus &&
+        typeof eventBus.emit === 'function'
+    ) {
+
+        try {
+
+            eventBus.emit(
+                'agent:started',
+                {
+                    version:
+                        VERSION,
+
+                    timestamp:
+                        Date.now()
+                }
+            );
+
+        } catch (error) {
+
+            logger.warn(
+                `agent:started event xatosi: ${error.message}`
+            );
+        }
+    }
+
+    logger.info(
+        '=================================================='
+    );
+
+    logger.info(
+        'AI AGENT ISHGA TUSHDI'
+    );
+
+    logger.info(
+        'Minecraft serverga ulanish tayyor.'
+    );
+
+    logger.info(
+        'Telegram/GitHub boshqaruvi tayyor bo‘lishi mumkin.'
+    );
+
+    logger.info(
+        '=================================================='
+    );
+
+    return {
+        success: true,
+
+        version:
+            VERSION,
+
+        started:
+            true,
+
+        services:
+            results
+    };
+}
+
+async function shutdown(
+    reason = 'shutdown'
+) {
+
+    if (shuttingDown) {
+        return;
+    }
+
+    shuttingDown = true;
+
+    logger.info(
+        `Agent to‘xtatilmoqda: ${reason}`
+    );
+
+    /*
+     * Avval autonomous AI'ni to'xtatamiz.
+     */
+
+    try {
+
+        if (
+            decisionEngine &&
+            typeof decisionEngine
+                .disableAutonomous ===
+            'function'
+        ) {
+
+            decisionEngine
+                .disableAutonomous();
+        }
+
+    } catch (error) {
+
+        logger.warn(
+            `Decision Engine to‘xtatishda xato: ${error.message}`
+        );
+    }
+
+    /*
+     * Servislarni teskari tartibda to'xtatamiz.
+     */
+
+    for (
+        let i = services.length - 1;
+        i >= 0;
+        i--
+    ) {
+
+        await stopService(
+            services[i]
+        );
+    }
+
+    /*
+     * Event.
+     */
+
+    try {
+
+        if (
+            eventBus &&
+            typeof eventBus.emit ===
+            'function'
+        ) {
+
+            eventBus.emit(
+                'agent:stopped',
+                {
+                    reason,
+                    timestamp:
+                        Date.now()
+                }
+            );
+        }
+
+    } catch {
+        // shutdown paytida event xatosi e'tiborsiz qoldiriladi
+    }
+
+    started = false;
+
+    logger.info(
+        'AI Agent to‘xtatildi.'
+    );
+
+    /*
+     * process.exit() ni bu yerda majburan chaqirmaymiz.
+     * Bu modulni test qilishni osonlashtiradi.
+     */
+}
+
+function getStatus() {
+
+    const result = {
+
+        version:
+            VERSION,
+
+        started,
+
+        shuttingDown,
+
+        timestamp:
+            Date.now(),
+
+        services: {}
+    };
+
+    for (
+        const service of services
+    ) {
+
+        const name =
+            serviceName(service);
+
+        try {
+
+            if (
+                typeof service.getStatus ===
+                'function'
+            ) {
+
+                result.services[name] =
+                    service.getStatus();
+
+            } else {
+
+                result.services[name] = {
+                    loaded:
+                        true
+                };
+            }
+
+        } catch (error) {
+
+            result.services[name] = {
+                loaded:
+                    true,
+
+                error:
+                    error.message
+            };
+        }
+    }
+
+    return result;
+}
+
+function getService(
+    name
+) {
+
+    return context.get(
+        name
+    );
+}
+
+/*
+ * Global process error handlers.
+ */
+
+process.on(
+    'SIGINT',
+    async () => {
+
+        await shutdown(
+            'SIGINT'
+        );
+
+        process.exit(
+            0
+        );
+    }
+);
+
+process.on(
+    'SIGTERM',
+    async () => {
+
+        await shutdown(
+            'SIGTERM'
+        );
+
+        process.exit(
+            0
+        );
+    }
+);
+
+process.on(
+    'uncaughtException',
+    error => {
+
+        logger.error(
+            `UNCAUGHT EXCEPTION: ${error.stack || error.message}`
+        );
+    }
+);
+
+process.on(
+    'unhandledRejection',
+    reason => {
+
+        logger.error(
+            `UNHANDLED REJECTION: ${
+                reason?.stack ||
+                reason?.message ||
+                String(reason)
+            }`
+        );
+    }
+);
+
+/*
+ * Faqat main entry sifatida ishga tushirilganda
+ * agentni start qilamiz.
+ *
+ * require('./src') qilinsa avtomatik start bo'lmaydi.
+ */
+
+if (
+    require.main === module
+) {
+
+    start()
+        .then(result => {
+
+            if (
+                result.success
+            ) {
+
+                logger.info(
+                    'Main process tayyor.'
+                );
+
+            } else {
+
+                logger.error(
+                    'Agent start bo‘lmadi.'
+                );
+            }
+
+        })
+        .catch(error => {
+
+            logger.error(
+                `FATAL START ERROR: ${error.stack || error.message}`
+            );
+
+            process.exit(
+                1
+            );
+        });
+}
+
+module.exports = {
+
+    VERSION,
+
+    start,
+
+    shutdown,
+
+    getStatus,
+
+    getService,
+
+    context,
+
+    services
+};
