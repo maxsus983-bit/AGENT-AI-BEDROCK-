@@ -1,0 +1,1139 @@
+'use strict';
+
+const context = require('../core/agent-context');
+const logger = require('../core/logger');
+
+class CommandInterpreter {
+
+    constructor() {
+
+        this.running = false;
+
+        this.maxInputLength = 12000;
+
+        this.maxHistory = 50;
+
+        this.history = [];
+
+        this.systemPrompt = `
+SEN MINECRAFT AI AGENT BUYRUQ INTERPRETERISAN.
+
+Sening vazifang foydalanuvchining tabiiy tildagi topshirig'ini
+Minecraft agenti bajara oladigan strukturalangan JSON buyruqqa aylantirish.
+
+Agent:
+- Minecraft Bedrock serverida ishlaydi.
+- Yurishi mumkin.
+- Joyga borishi mumkin.
+- Playerlarni kuzatishi mumkin.
+- Atrofni tekshirishi mumkin.
+- Chat o'qishi va yozishi mumkin.
+- Qurishi mumkin.
+- Jang qilishi mumkin.
+- Xotiradan foydalanishi mumkin.
+- Mustaqil rejimda qaror qilishi mumkin.
+- Tashqaridan Telegram/GitHub va boshqa kanallardan buyruq qabul qilishi mumkin.
+
+MUHIM:
+1. Foydalanuvchi buyruq berganda uning maqsadini aniqlashga harakat qil.
+2. Kerak bo'lsa bitta topshiriqni bir nechta bosqichga ajrat.
+3. Aniq bo'lmagan ma'lumotni o'zing uydirma.
+4. Koordinata berilmagan bo'lsa koordinata o'ylab topma.
+5. Player nomi berilmagan bo'lsa uni uydirma.
+6. "O'zing hal qil", "o'zing qaror qil", "mustaqil harakat qil" kabi buyruqlarni autonomous rejim sifatida tushun.
+7. "Kuzat" buyruqlarida kuzatiladigan obyektni aniqlashga harakat qil.
+8. Jang buyruqlarida target ko'rsatilmagan bo'lsa agent vaziyatga qarab target tanlashi mumkin.
+9. Qurilish topshirig'ida bino turi, joyi va materialini aniqlashga harakat qil.
+10. Foydalanuvchining maqsadini saqla, lekin mavjud bo'lmagan faktni yaratma.
+11. Har doim faqat JSON qaytar.
+12. Markdown ishlatma.
+13. JSON tashqarisida hech qanday matn yozma.
+
+RUXSAT ETILGAN ACTIONLAR:
+
+move
+fight
+auto_fight
+build
+watch
+watch_hidden
+watch_all
+follow
+chat
+report
+scan
+remember
+recall
+autonomous
+stop
+status
+
+JSON FORMAT:
+
+{
+  "intent": "asosiy maqsad",
+  "confidence": 0.0,
+  "requires_confirmation": false,
+  "actions": [
+    {
+      "action": "move",
+      "parameters": {},
+      "reason": "..."
+    }
+  ],
+  "response": "foydalanuvchiga qisqa tushuntirish"
+}
+
+Agar topshiriq noaniq bo'lsa:
+
+{
+  "intent": "unknown",
+  "confidence": 0.0,
+  "requires_confirmation": true,
+  "actions": [],
+  "response": "Aniqlashtirish kerak bo'lgan savol"
+}
+
+Agar foydalanuvchi "o'zing hal qil" desa:
+autonomous action yarat.
+
+Agar foydalanuvchi:
+"falon playerni kuzat, nima qilayotganini menga aytib tur"
+desa:
+watch + report/continuous observation maqsadini yarat.
+
+Agar:
+"borib u yerda uy qur"
+desa:
+move + build yarat.
+
+Agar:
+"jang qil va kerak bo'lsa o'zing chekin"
+desa:
+fight + autonomous combat logic yarat.
+
+`;
+    }
+
+    start() {
+
+        if (this.running) {
+            return;
+        }
+
+        this.running = true;
+
+        logger.info(
+            'AI Command Interpreter ishga tushdi.'
+        );
+    }
+
+    stop() {
+
+        this.running = false;
+    }
+
+    async interpret(
+        text,
+        metadata = {}
+    ) {
+
+        if (!text) {
+
+            return {
+                success: false,
+                error:
+                    'Buyruq bo‘sh.'
+            };
+        }
+
+        const input =
+            String(text)
+                .trim();
+
+        if (
+            input.length >
+            this.maxInputLength
+        ) {
+
+            return {
+                success: false,
+                error:
+                    'Buyruq juda uzun.'
+            };
+        }
+
+        /*
+        Avval lokal parserdan foydalanamiz.
+        Bu oddiy buyruqlar uchun AI chaqiruvini
+        bekorga ishlatmaslik imkonini beradi.
+        */
+
+        const parser =
+            context.get(
+                'command-parser'
+            );
+
+        if (
+            parser &&
+            typeof parser.parse ===
+            'function'
+        ) {
+
+            const local =
+                parser.parse(
+                    input,
+                    metadata
+                );
+
+            if (
+                local &&
+                local.success &&
+                local.confidence >= 0.90
+            ) {
+
+                return {
+
+                    success: true,
+
+                    source:
+                        'local-parser',
+
+                    input,
+
+                    interpretation: {
+
+                        intent:
+                            local.action,
+
+                        confidence:
+                            local.confidence,
+
+                        requires_confirmation:
+                            false,
+
+                        actions: [
+                            {
+                                action:
+                                    local.action,
+
+                                parameters:
+                                    local.parameters ||
+                                    {}
+                            }
+                        ],
+
+                        response:
+                            parser.explain
+                                ? parser.explain(local)
+                                : local.action
+                    }
+                };
+            }
+        }
+
+        /*
+        Lokal parser tushunmasa OpenRouter.
+        */
+
+        const ai =
+            this.getAI();
+
+        if (!ai) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'AI provider topilmadi.',
+
+                fallback: {
+
+                    action:
+                        'unknown',
+
+                    input
+                }
+            };
+        }
+
+        const worldContext =
+            this.buildWorldContext();
+
+        const recentHistory =
+            this.history.slice(
+                -this.maxHistory
+            );
+
+        const userPrompt =
+            this.buildPrompt(
+                input,
+                metadata,
+                worldContext,
+                recentHistory
+            );
+
+        try {
+
+            const raw =
+                await this.callAI(
+                    ai,
+                    userPrompt
+                );
+
+            const parsed =
+                this.parseAIResponse(
+                    raw
+                );
+
+            if (
+                !parsed
+            ) {
+
+                return {
+
+                    success: false,
+
+                    error:
+                        'AI javobi yaroqli JSON emas.',
+
+                    raw
+                };
+            }
+
+            const validated =
+                this.validate(
+                    parsed
+                );
+
+            if (
+                !validated.valid
+            ) {
+
+                return {
+
+                    success: false,
+
+                    error:
+                        validated.error,
+
+                    interpretation:
+                        parsed
+                };
+            }
+
+            this.rememberInterpretation(
+                input,
+                parsed,
+                metadata
+            );
+
+            return {
+
+                success: true,
+
+                source:
+                    'openrouter',
+
+                input,
+
+                interpretation:
+                    parsed
+            };
+
+        } catch (error) {
+
+            logger.error(
+                `Command Interpreter xatosi: ${error.message}`
+            );
+
+            return {
+
+                success: false,
+
+                error:
+                    error.message,
+
+                input
+            };
+        }
+    }
+
+    async interpretAndExecute(
+        text,
+        metadata = {}
+    ) {
+
+        const result =
+            await this.interpret(
+                text,
+                metadata
+            );
+
+        if (
+            !result.success
+        ) {
+
+            return result;
+        }
+
+        const interpretation =
+            result.interpretation;
+
+        if (
+            interpretation
+                .requires_confirmation
+        ) {
+
+            return {
+
+                success: false,
+
+                requiresConfirmation:
+                    true,
+
+                interpretation
+            };
+        }
+
+        const registry =
+            context.get(
+                'action-registry'
+            );
+
+        if (
+            !registry
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Action Registry topilmadi.',
+
+                interpretation
+            };
+        }
+
+        const actions =
+            Array.isArray(
+                interpretation.actions
+            )
+                ? interpretation.actions
+                : [];
+
+        const results = [];
+
+        for (
+            const action of actions
+        ) {
+
+            const execution =
+                await registry.execute(
+                    action.action,
+                    action.parameters || {},
+                    metadata
+                );
+
+            results.push(
+                execution
+            );
+
+            /*
+            Bir action muvaffaqiyatsiz bo'lsa,
+            keyingi actionlar har doim to'xtamaydi.
+            Chunki AI topshirig'i ko'p bosqichli bo'lishi mumkin.
+            */
+
+        }
+
+        return {
+
+            success:
+                results.every(
+                    item =>
+                        item &&
+                        item.success !== false
+                ),
+
+            input:
+                text,
+
+            interpretation,
+
+            results
+        };
+    }
+
+    buildPrompt(
+        input,
+        metadata,
+        worldContext,
+        recentHistory
+    ) {
+
+        return JSON.stringify({
+
+            system:
+                this.systemPrompt,
+
+            user_command:
+                input,
+
+            source:
+                metadata.source ||
+                'external',
+
+            user:
+                metadata.user ||
+                null,
+
+            channel:
+                metadata.channel ||
+                null,
+
+            world:
+                worldContext,
+
+            recent_interpretations:
+                recentHistory
+        });
+    }
+
+    async callAI(
+        ai,
+        prompt
+    ) {
+
+        /*
+        OpenRouter wrapper turli interfeyslar bilan
+        ishlashi uchun bir nechta usulni qo'llab-quvvatlaymiz.
+        */
+
+        if (
+            typeof ai.chat ===
+            'function'
+        ) {
+
+            const response =
+                await ai.chat(
+                    [
+                        {
+                            role:
+                                'system',
+
+                            content:
+                                this.systemPrompt
+                        },
+                        {
+                            role:
+                                'user',
+
+                            content:
+                                prompt
+                        }
+                    ]
+                );
+
+            return this.extractContent(
+                response
+            );
+        }
+
+        if (
+            typeof ai.complete ===
+            'function'
+        ) {
+
+            const response =
+                await ai.complete(
+                    prompt
+                );
+
+            return this.extractContent(
+                response
+            );
+        }
+
+        if (
+            typeof ai.ask ===
+            'function'
+        ) {
+
+            const response =
+                await ai.ask(
+                    prompt
+                );
+
+            return this.extractContent(
+                response
+            );
+        }
+
+        if (
+            typeof ai.generate ===
+            'function'
+        ) {
+
+            const response =
+                await ai.generate(
+                    prompt
+                );
+
+            return this.extractContent(
+                response
+            );
+        }
+
+        throw new Error(
+            'OpenRouter modulida chat(), complete(), ask() yoki generate() topilmadi.'
+        );
+    }
+
+    extractContent(
+        response
+    ) {
+
+        if (
+            response === null ||
+            response === undefined
+        ) {
+
+            return '';
+        }
+
+        if (
+            typeof response ===
+            'string'
+        ) {
+
+            return response;
+        }
+
+        if (
+            response.content
+        ) {
+
+            return response.content;
+        }
+
+        if (
+            response.message &&
+            response.message.content
+        ) {
+
+            return response.message.content;
+        }
+
+        if (
+            response.choices &&
+            response.choices[0]
+        ) {
+
+            const choice =
+                response.choices[0];
+
+            if (
+                choice.message &&
+                choice.message.content
+            ) {
+
+                return choice.message.content;
+            }
+
+            if (
+                choice.text
+            ) {
+
+                return choice.text;
+            }
+        }
+
+        if (
+            response.output_text
+        ) {
+
+            return response.output_text;
+        }
+
+        return JSON.stringify(
+            response
+        );
+    }
+
+    parseAIResponse(
+        raw
+    ) {
+
+        if (!raw) {
+            return null;
+        }
+
+        let text =
+            String(raw)
+                .trim();
+
+        /*
+        Markdown JSON fence bo'lsa olib tashlaymiz.
+        */
+
+        text =
+            text.replace(
+                /^```json\s*/i,
+                ''
+            );
+
+        text =
+            text.replace(
+                /^```\s*/i,
+                ''
+            );
+
+        text =
+            text.replace(
+                /\s*```$/i,
+                ''
+            );
+
+        try {
+
+            return JSON.parse(
+                text
+            );
+
+        } catch (_) {}
+
+        /*
+        Javob ichidan birinchi JSON obyektni topish.
+        */
+
+        const start =
+            text.indexOf('{');
+
+        const end =
+            text.lastIndexOf('}');
+
+        if (
+            start === -1 ||
+            end === -1 ||
+            end <= start
+        ) {
+
+            return null;
+        }
+
+        const candidate =
+            text.slice(
+                start,
+                end + 1
+            );
+
+        try {
+
+            return JSON.parse(
+                candidate
+            );
+
+        } catch (_) {
+
+            return null;
+        }
+    }
+
+    validate(
+        interpretation
+    ) {
+
+        if (
+            !interpretation ||
+            typeof interpretation !==
+            'object'
+        ) {
+
+            return {
+
+                valid: false,
+
+                error:
+                    'Interpretation object emas.'
+            };
+        }
+
+        if (
+            typeof interpretation.intent !==
+            'string'
+        ) {
+
+            return {
+
+                valid: false,
+
+                error:
+                    'intent mavjud emas.'
+            };
+        }
+
+        if (
+            !Array.isArray(
+                interpretation.actions
+            )
+        ) {
+
+            return {
+
+                valid: false,
+
+                error:
+                    'actions array bo‘lishi kerak.'
+            };
+        }
+
+        const allowed =
+            new Set([
+
+                'move',
+                'fight',
+                'auto_fight',
+                'build',
+                'watch',
+                'watch_hidden',
+                'watch_all',
+                'follow',
+                'chat',
+                'report',
+                'scan',
+                'remember',
+                'recall',
+                'autonomous',
+                'stop',
+                'status'
+            ]);
+
+        for (
+            const action of
+            interpretation.actions
+        ) {
+
+            if (
+                !action ||
+                typeof action !==
+                'object'
+            ) {
+
+                return {
+
+                    valid: false,
+
+                    error:
+                        'Noto‘g‘ri action.'
+                };
+            }
+
+            if (
+                !allowed.has(
+                    action.action
+                )
+            ) {
+
+                return {
+
+                    valid: false,
+
+                    error:
+                        `Ruxsatsiz action: ${action.action}`
+                };
+            }
+
+            if (
+                action.parameters !==
+                undefined &&
+                (
+                    typeof action.parameters !==
+                    'object' ||
+                    action.parameters ===
+                    null
+                )
+            ) {
+
+                return {
+
+                    valid: false,
+
+                    error:
+                        'Action parameters object bo‘lishi kerak.'
+                };
+            }
+        }
+
+        if (
+            interpretation.confidence !==
+            undefined
+        ) {
+
+            const confidence =
+                Number(
+                    interpretation.confidence
+                );
+
+            if (
+                !Number.isFinite(
+                    confidence
+                ) ||
+                confidence < 0 ||
+                confidence > 1
+            ) {
+
+                return {
+
+                    valid: false,
+
+                    error:
+                        'confidence 0 va 1 orasida bo‘lishi kerak.'
+                };
+            }
+        }
+
+        return {
+            valid: true
+        };
+    }
+
+    buildWorldContext() {
+
+        const state =
+            context.get(
+                'state'
+            );
+
+        const observer =
+            context.get(
+                'world-observer'
+            );
+
+        const tracker =
+            context.get(
+                'player-tracker'
+            );
+
+        const result = {};
+
+        try {
+
+            if (
+                state &&
+                typeof state.get ===
+                'function'
+            ) {
+
+                result.state =
+                    state.get();
+            }
+
+        } catch (_) {}
+
+        try {
+
+            if (
+                observer &&
+                typeof observer.getSnapshot ===
+                'function'
+            ) {
+
+                result.world =
+                    observer.getSnapshot();
+            }
+
+        } catch (_) {}
+
+        try {
+
+            if (
+                tracker &&
+                typeof tracker.getSnapshot ===
+                'function'
+            ) {
+
+                result.players =
+                    tracker.getSnapshot();
+            }
+
+        } catch (_) {}
+
+        return this.limitObject(
+            result,
+            18000
+        );
+    }
+
+    limitObject(
+        object,
+        maxChars
+    ) {
+
+        let serialized;
+
+        try {
+
+            serialized =
+                JSON.stringify(
+                    object
+                );
+
+        } catch (_) {
+
+            return {};
+        }
+
+        if (
+            serialized.length <=
+            maxChars
+        ) {
+
+            return object;
+        }
+
+        return {
+
+            truncated:
+                true,
+
+            data:
+                serialized.slice(
+                    0,
+                    maxChars
+                )
+        };
+    }
+
+    rememberInterpretation(
+        input,
+        interpretation,
+        metadata
+    ) {
+
+        const record = {
+
+            timestamp:
+                Date.now(),
+
+            input,
+
+            interpretation,
+
+            source:
+                metadata.source ||
+                'external'
+        };
+
+        this.history.push(
+            record
+        );
+
+        if (
+            this.history.length >
+            this.maxHistory
+        ) {
+
+            this.history.splice(
+                0,
+                this.history.length -
+                this.maxHistory
+            );
+        }
+
+        const memory =
+            context.get(
+                'memory'
+            );
+
+        if (
+            memory &&
+            typeof memory.addEvent ===
+            'function'
+        ) {
+
+            try {
+
+                memory.addEvent({
+
+                    type:
+                        'command_interpretation',
+
+                    data:
+                        record
+                });
+
+            } catch (error) {
+
+                logger.warn(
+                    `Interpretation xotiraga saqlanmadi: ${error.message}`
+                );
+            }
+        }
+    }
+
+    getAI() {
+
+        return (
+            context.get(
+                'openrouter'
+            ) ||
+            context.get(
+                'ai-provider'
+            ) ||
+            context.get(
+                'ai'
+            )
+        );
+    }
+
+    getHistory(
+        limit = 50
+    ) {
+
+        return this.history.slice(
+            -Math.max(
+                1,
+                Number(limit) || 50
+            )
+        );
+    }
+
+    clearHistory() {
+
+        this.history = [];
+
+        return {
+            success: true
+        };
+    }
+
+    status() {
+
+        return {
+
+            running:
+                this.running,
+
+            history:
+                this.history.length,
+
+            maxHistory:
+                this.maxHistory,
+
+            maxInputLength:
+                this.maxInputLength
+        };
+    }
+}
+
+const interpreter =
+    new CommandInterpreter();
+
+module.exports =
+    interpreter;
+
+module.exports.CommandInterpreter =
+    CommandInterpreter;
