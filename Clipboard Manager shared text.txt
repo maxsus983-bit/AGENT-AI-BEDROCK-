@@ -1,0 +1,1727 @@
+'use strict';
+
+const context = require('../core/agent-context');
+const logger = require('../core/logger');
+
+class AIBrain {
+
+    constructor() {
+
+        this.running = false;
+
+        this.busy = false;
+
+        this.autonomous = false;
+
+        this.thinking = false;
+
+        this.lastDecision = null;
+
+        this.lastThought = null;
+
+        this.lastError = null;
+
+        this.decisionHistory = [];
+
+        this.maxDecisionHistory = 5000;
+
+        this.settings = {
+
+            thinkInterval: 3000,
+
+            maxContextEvents: 50,
+
+            maxChatMessages: 30,
+
+            maxPlayers: 30,
+
+            maxEntities: 50,
+
+            temperature: 0.2,
+
+            maxTokens: 1800
+        };
+
+        this.autonomousTimer = null;
+
+        this.systemPrompt =
+            this.createSystemPrompt();
+    }
+
+    start() {
+
+        if (this.running) {
+            return;
+        }
+
+        this.running = true;
+
+        logger.info(
+            'AI Brain ishga tushdi.'
+        );
+
+        context.eventBus.emitSafe(
+            'ai:started',
+            {}
+        );
+    }
+
+    stop() {
+
+        this.running = false;
+
+        this.autonomous = false;
+
+        this.stopAutonomousLoop();
+
+        context.eventBus.emitSafe(
+            'ai:stopped',
+            {}
+        );
+
+        logger.info(
+            'AI Brain to‘xtatildi.'
+        );
+    }
+
+    createSystemPrompt() {
+
+        return `
+SEN — Minecraft Bedrock AI AGENTISAN.
+
+Sening vazifang faqat savolga javob berish emas.
+
+Sen Minecraft dunyosida yashaydigan mustaqil agent sifatida:
+- ko‘rishing;
+- kuzatishing;
+- eshitishing;
+- chatni o‘qishing;
+- o‘yinchilarni kuzatishing;
+- vaziyatni tahlil qilishing;
+- qaror qabul qilishing;
+- yurishing;
+- jang qilishing;
+- himoyalanishing;
+- qurishing;
+- blok buzishing;
+- resurs izlash;
+- kerakli joyga borish;
+- xavfdan qochish;
+- o‘yinchilar bilan chatlashish;
+- berilgan vazifalarni bajarish;
+- uzoq muddatli maqsadlarni rejalash
+
+uchun ishlaysan.
+
+MUHIM:
+
+1. Hech qachon o‘zingda mavjud bo‘lmagan ma’lumotni ko‘rdim deb da’vo qilma.
+
+2. World Observer bergan ma’lumotni asosiy kuzatuv manbasi deb bil.
+
+3. Koordinatalarni oddiy tushunarli tilda ham tushuntir.
+
+4. Tashqi boshqaruvdan kelgan buyruqni tushunishga harakat qil.
+
+5. Buyruq noaniq bo‘lsa, eng xavfsiz va mantiqiy talqinni tanla yoki aniqlashtir.
+
+6. Agar bir nechta vazifa bo‘lsa, ularni ustuvorlik bo‘yicha tartibla.
+
+7. Hayot xavfi mavjud bo‘lsa, avval omon qol.
+
+8. Jangda keraksiz xavfga kirmagin.
+
+9. Qurilishdan oldin kerakli material mavjudligini tekshir.
+
+10. Biror ishni bajara olmasang, sababini aniq bildir.
+
+11. Harakatni bajarish bilan birga natijani ham qayd qil.
+
+12. O‘yinchilarni kuzatishda mavjud kuzatuv ma’lumotidan foydalan.
+
+13. Player chatlarini boshqa ma'lumotlardan ajratib ko‘rsat.
+
+14. Muhim hodisalarni xotiraga saqlash uchun memory tizimiga yubor.
+
+15. Mustaqil rejim yoqilganida vaziyatga qarab o‘zing qaror qabul qil.
+
+16. Tashqi foydalanuvchi buyruqlari autonomous qarorlardan ustun.
+
+17. Favqulodda xavf tashqi buyruqdan ham ustun bo‘lishi mumkin, agar buyruq botning darhol o‘lishiga olib kelsa.
+
+18. "Jang qil" deyilsa Combat Engine ishlatiladi.
+
+19. "Bor", "yur", "shu joyga bor" deyilsa Movement Engine ishlatiladi.
+
+20. "Qur", "blok qo‘y", "uy qur" deyilsa Build Engine ishlatiladi.
+
+21. "Kuzat" deyilsa World Observer ishlatiladi.
+
+22. "Chatga yoz" deyilsa Chat Engine ishlatiladi.
+
+23. "Avtomatik harakat qil" deyilsa Autonomous Controller ishlatiladi.
+
+24. Har bir qarorni ACTION JSON orqali ifodala.
+
+ACTION FORMAT:
+
+{
+  "reply": "foydalanuvchiga tushunarli javob",
+  "actions": [
+    {
+      "type": "move|attack|build|break|chat|observe|follow|defend|retreat|wait|remember",
+      "priority": 1,
+      "parameters": {}
+    }
+  ],
+  "memory": [],
+  "observation_request": null,
+  "reason": "qarorning qisqa sababi"
+}
+
+PRIORITY:
+
+1 = favqulodda
+2 = juda muhim
+3 = oddiy muhim
+4 = ikkilamchi
+5 = keyingi vazifa
+
+Hech qachon ACTION JSON tashqarisida boshqa format yaratma.
+
+Foydalanuvchiga beriladigan reply qisqa, lekin foydali bo‘lsin.
+`;
+    }
+
+    async processCommand(
+        command,
+        options = {}
+    ) {
+
+        this.start();
+
+        if (
+            !command ||
+            !String(command).trim()
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Bo‘sh buyruq.'
+            };
+        }
+
+        if (this.busy) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'AI hozir boshqa vazifani tahlil qilmoqda.'
+            };
+        }
+
+        this.busy = true;
+
+        this.thinking = true;
+
+        this.lastError = null;
+
+        try {
+
+            const observation =
+                this.collectWorldContext();
+
+            const memory =
+                await this.getMemoryContext(
+                    command
+                );
+
+            const prompt =
+                this.buildCommandPrompt(
+                    command,
+                    observation,
+                    memory,
+                    options
+                );
+
+            const response =
+                await this.askAI(
+                    prompt
+                );
+
+            const decision =
+                this.parseDecision(
+                    response
+                );
+
+            this.lastThought =
+                response;
+
+            this.lastDecision =
+                decision;
+
+            this.recordDecision({
+
+                source:
+                    options.source ||
+                    'external',
+
+                command:
+                    String(command),
+
+                decision,
+
+                timestamp:
+                    Date.now()
+            });
+
+            await this.saveImportantMemory(
+                command,
+                decision
+            );
+
+            const execution =
+                await this.executeActions(
+                    decision.actions || []
+                );
+
+            const result = {
+
+                success: true,
+
+                reply:
+                    decision.reply ||
+                    'Buyruq tahlil qilindi.',
+
+                reason:
+                    decision.reason ||
+                    null,
+
+                actions:
+                    decision.actions ||
+                    [],
+
+                execution,
+
+                observationRequest:
+                    decision.observation_request ||
+                    null
+            };
+
+            context.eventBus.emitSafe(
+                'ai:command_processed',
+                result
+            );
+
+            return result;
+
+        } catch (error) {
+
+            this.lastError =
+                error.message;
+
+            logger.error(
+                `AI Brain xatosi: ${error.message}`
+            );
+
+            context.eventBus.emitSafe(
+                'ai:error',
+                {
+                    error:
+                        error.message
+                }
+            );
+
+            return {
+
+                success: false,
+
+                error:
+                    error.message
+            };
+
+        } finally {
+
+            this.busy = false;
+
+            this.thinking = false;
+        }
+    }
+
+    async think() {
+
+        if (
+            !this.running ||
+            this.thinking
+        ) {
+
+            return null;
+        }
+
+        if (
+            !this.autonomous
+        ) {
+
+            return null;
+        }
+
+        this.thinking = true;
+
+        try {
+
+            const observation =
+                this.collectWorldContext();
+
+            const memory =
+                await this.getMemoryContext(
+                    'autonomous world decision'
+                );
+
+            const prompt =
+                this.buildAutonomousPrompt(
+                    observation,
+                    memory
+                );
+
+            const response =
+                await this.askAI(
+                    prompt
+                );
+
+            const decision =
+                this.parseDecision(
+                    response
+                );
+
+            this.lastThought =
+                response;
+
+            this.lastDecision =
+                decision;
+
+            this.recordDecision({
+
+                source:
+                    'autonomous',
+
+                command:
+                    null,
+
+                decision,
+
+                timestamp:
+                    Date.now()
+            });
+
+            if (
+                decision.actions &&
+                decision.actions.length
+            ) {
+
+                await this.executeActions(
+                    decision.actions
+                );
+            }
+
+            context.eventBus.emitSafe(
+                'ai:autonomous_decision',
+                decision
+            );
+
+            return decision;
+
+        } catch (error) {
+
+            this.lastError =
+                error.message;
+
+            context.eventBus.emitSafe(
+                'ai:autonomous_error',
+                {
+                    error:
+                        error.message
+                }
+            );
+
+            return null;
+
+        } finally {
+
+            this.thinking = false;
+        }
+    }
+
+    enableAutonomous() {
+
+        this.start();
+
+        if (
+            this.autonomous
+        ) {
+            return;
+        }
+
+        this.autonomous = true;
+
+        this.startAutonomousLoop();
+
+        context.eventBus.emitSafe(
+            'ai:autonomous_enabled',
+            {}
+        );
+
+        logger.info(
+            'AI Autonomous Mode YOQILDI.'
+        );
+    }
+
+    disableAutonomous() {
+
+        this.autonomous = false;
+
+        this.stopAutonomousLoop();
+
+        context.eventBus.emitSafe(
+            'ai:autonomous_disabled',
+            {}
+        );
+
+        logger.info(
+            'AI Autonomous Mode O‘CHIRILDI.'
+        );
+    }
+
+    startAutonomousLoop() {
+
+        this.stopAutonomousLoop();
+
+        this.autonomousTimer =
+            setInterval(
+                () => {
+
+                    this.think()
+                        .catch(
+                            error => {
+
+                                logger.error(
+                                    `Autonomous AI: ${error.message}`
+                                );
+                            }
+                        );
+
+                },
+                this.settings.thinkInterval
+            );
+    }
+
+    stopAutonomousLoop() {
+
+        if (
+            this.autonomousTimer
+        ) {
+
+            clearInterval(
+                this.autonomousTimer
+            );
+
+            this.autonomousTimer =
+                null;
+        }
+    }
+
+    collectWorldContext() {
+
+        const observer =
+            context.get(
+                'world-observer'
+            ) ||
+            context.get(
+                'observer'
+            );
+
+        if (
+            !observer
+        ) {
+
+            return {
+
+                available:
+                    false,
+
+                message:
+                    'World Observer mavjud emas.'
+            };
+        }
+
+        let position = null;
+
+        if (
+            typeof observer.getBotPosition ===
+            'function'
+        ) {
+
+            position =
+                observer.getBotPosition();
+        }
+
+        const players =
+            this.limitArray(
+                typeof observer.getNearbyPlayers ===
+                'function'
+                    ? observer.getNearbyPlayers(
+                        position,
+                        32
+                    )
+                    : (
+                        typeof observer.getPlayers ===
+                        'function'
+                            ? observer.getPlayers()
+                            : []
+                    ),
+                this.settings.maxPlayers
+            );
+
+        const entities =
+            this.limitArray(
+                typeof observer.getNearbyEntities ===
+                'function'
+                    ? observer.getNearbyEntities(
+                        position,
+                        32
+                    )
+                    : (
+                        typeof observer.getEntities ===
+                        'function'
+                            ? observer.getEntities()
+                            : []
+                    ),
+                this.settings.maxEntities
+            );
+
+        const chat =
+            this.limitArray(
+                typeof observer.getChat ===
+                'function'
+                    ? observer.getChat(
+                        this.settings.maxChatMessages
+                    )
+                    : [],
+                this.settings.maxChatMessages
+            );
+
+        const events =
+            this.limitArray(
+                typeof observer.getEvents ===
+                'function'
+                    ? observer.getEvents(
+                        this.settings.maxContextEvents
+                    )
+                    : [],
+                this.settings.maxContextEvents
+            );
+
+        return {
+
+            available:
+                true,
+
+            timestamp:
+                Date.now(),
+
+            position,
+
+            players:
+                this.cleanPlayers(
+                    players
+                ),
+
+            entities:
+                this.cleanEntities(
+                    entities
+                ),
+
+            chat,
+
+            events,
+
+            bot:
+                this.getBotState()
+        };
+    }
+
+    getBotState() {
+
+        const adapter =
+            context.get(
+                'bedrock-adapter'
+            );
+
+        const movement =
+            context.get(
+                'movement'
+            ) ||
+            context.get(
+                'movement-engine'
+            );
+
+        const combat =
+            context.get(
+                'combat'
+            );
+
+        const build =
+            context.get(
+                'build'
+            );
+
+        return {
+
+            username:
+                context.state.username ||
+                null,
+
+            position:
+                adapter &&
+                typeof adapter.getPosition ===
+                'function'
+                    ? adapter.getPosition()
+                    : context.state.position ||
+                    null,
+
+            health:
+                adapter &&
+                typeof adapter.getHealth ===
+                'function'
+                    ? adapter.getHealth()
+                    : context.state.health ??
+                    null,
+
+            hunger:
+                adapter &&
+                typeof adapter.getHunger ===
+                'function'
+                    ? adapter.getHunger()
+                    : context.state.hunger ??
+                    null,
+
+            movement:
+                movement &&
+                typeof movement.status ===
+                'function'
+                    ? movement.status()
+                    : null,
+
+            combat:
+                combat &&
+                typeof combat.status ===
+                'function'
+                    ? combat.status()
+                    : null,
+
+            build:
+                build &&
+                typeof build.status ===
+                'function'
+                    ? build.status()
+                    : null
+        };
+    }
+
+    cleanPlayers(
+        players
+    ) {
+
+        return players.map(
+            player => ({
+
+                name:
+                    player.name ||
+                    null,
+
+                position:
+                    player.position ||
+                    null,
+
+                health:
+                    player.health ??
+                    null,
+
+                sneaking:
+                    Boolean(
+                        player.sneaking
+                    ),
+
+                sprinting:
+                    Boolean(
+                        player.sprinting
+                    ),
+
+                lastSeen:
+                    player.lastSeen ||
+                    null
+            })
+        );
+    }
+
+    cleanEntities(
+        entities
+    ) {
+
+        return entities.map(
+            entity => ({
+
+                id:
+                    entity.id ||
+                    null,
+
+                name:
+                    entity.name ||
+                    null,
+
+                type:
+                    entity.type ||
+                    null,
+
+                position:
+                    entity.position ||
+                    null,
+
+                health:
+                    entity.health ??
+                    null
+            })
+        );
+    }
+
+    async getMemoryContext(
+        query
+    ) {
+
+        const memory =
+            context.get(
+                'memory'
+            ) ||
+            context.get(
+                'memory-manager'
+            );
+
+        if (
+            !memory
+        ) {
+
+            return [];
+        }
+
+        try {
+
+            if (
+                typeof memory.search ===
+                'function'
+            ) {
+
+                return await memory.search(
+                    String(query),
+                    30
+                );
+            }
+
+            if (
+                typeof memory.recall ===
+                'function'
+            ) {
+
+                return await memory.recall(
+                    String(query)
+                );
+            }
+
+        } catch (error) {
+
+            logger.warn(
+                `Memory recall xatosi: ${error.message}`
+            );
+        }
+
+        return [];
+    }
+
+    async saveImportantMemory(
+        command,
+        decision
+    ) {
+
+        const memory =
+            context.get(
+                'memory'
+            ) ||
+            context.get(
+                'memory-manager'
+            );
+
+        if (
+            !memory
+        ) {
+            return;
+        }
+
+        try {
+
+            if (
+                typeof memory.remember ===
+                'function'
+            ) {
+
+                await memory.remember({
+
+                    type:
+                        'ai_decision',
+
+                    command:
+                        String(command),
+
+                    decision:
+                        decision,
+
+                    timestamp:
+                        Date.now()
+                });
+            }
+
+        } catch (error) {
+
+            logger.warn(
+                `Memory save xatosi: ${error.message}`
+            );
+        }
+    }
+
+    buildCommandPrompt(
+        command,
+        observation,
+        memory,
+        options
+    ) {
+
+        return `
+${this.systemPrompt}
+
+EXTERNAL COMMAND:
+
+${String(command)}
+
+COMMAND SOURCE:
+
+${options.source || 'unknown'}
+
+WORLD OBSERVATION:
+
+${this.safeJSON(
+    observation
+)}
+
+RELEVANT MEMORY:
+
+${this.safeJSON(
+    memory
+)}
+
+IMPORTANT:
+
+Foydalanuvchi bu buyruqni Minecraft serveriga
+tashqaridan yuborgan.
+
+Buyruqni Minecraft ichidagi vazifa sifatida tushun.
+
+Agar "oldinga yur" deyilsa:
+movement action.
+
+Agar "falon joyga bor" deyilsa:
+movement/pathfinding action.
+
+Agar "jang qil" deyilsa:
+combat action.
+
+Agar "falonchini ur" deyilsa:
+targeted combat action.
+
+Agar "kuzat" deyilsa:
+observation/watch action.
+
+Agar "shu yerga uy qur" deyilsa:
+build planning action.
+
+Agar "chatga yoz" deyilsa:
+chat action.
+
+Agar foydalanuvchi "o‘zing harakat qil"
+desa autonomous mode yoqilishi mumkin.
+
+Agar foydalanuvchi "to‘xta" desa,
+aktiv vazifalarni to‘xtatish kerak.
+
+Faqat haqiqatan mavjud modullarni action sifatida
+chaqirishga harakat qil.
+
+Natijani JSON formatida qaytar.
+`;
+    }
+
+    buildAutonomousPrompt(
+        observation,
+        memory
+    ) {
+
+        return `
+${this.systemPrompt}
+
+AUTONOMOUS MODE:
+
+Foydalanuvchi botga mustaqil harakat qilishga
+ruxsat bergan.
+
+Hozirgi Minecraft vaziyatini tahlil qil.
+
+Quyidagilarni hisobga ol:
+
+- botning health holati;
+- hunger;
+- yaqin playerlar;
+- playerlarning harakati;
+- chat;
+- yaqin entitylar;
+- xavf;
+- mavjud vazifalar;
+- oldingi xotira;
+- oxirgi qaror;
+- botning joylashuvi.
+
+Keraksiz ish qilma.
+
+Agar xavf bo‘lmasa:
+- foydali faoliyat tanla;
+- atrofni kuzat;
+- resurs izlash;
+- xavfsiz joy topish;
+- foydalanuvchining oldingi maqsadlarini davom ettirish.
+
+Agar playerlar bilan bog‘liq muhim voqea bo‘lsa,
+uni kuzat.
+
+Agar hujum bo‘lsa,
+o‘zini himoya qilishni ustuvor qil.
+
+Agar buyruq kutilayotgan bo‘lsa,
+o‘zboshimchalik bilan katta xavfli vazifa boshlama.
+
+WORLD:
+
+${this.safeJSON(
+    observation
+)}
+
+MEMORY:
+
+${this.safeJSON(
+    memory
+)}
+
+JSON ACTION qaytar.
+`;
+    }
+
+    async askAI(
+        prompt
+    ) {
+
+        const provider =
+            context.get(
+                'openrouter'
+            ) ||
+            context.get(
+                'ai-provider'
+            );
+
+        if (
+            !provider
+        ) {
+
+            throw new Error(
+                'OpenRouter AI provider topilmadi.'
+            );
+        }
+
+        if (
+            typeof provider.complete ===
+            'function'
+        ) {
+
+            return provider.complete({
+
+                system:
+                    this.systemPrompt,
+
+                prompt,
+
+                temperature:
+                    this.settings.temperature,
+
+                maxTokens:
+                    this.settings.maxTokens
+            });
+        }
+
+        if (
+            typeof provider.chat ===
+            'function'
+        ) {
+
+            return provider.chat({
+
+                messages: [
+
+                    {
+                        role:
+                            'system',
+
+                        content:
+                            this.systemPrompt
+                    },
+
+                    {
+                        role:
+                            'user',
+
+                        content:
+                            prompt
+                    }
+                ],
+
+                temperature:
+                    this.settings.temperature,
+
+                max_tokens:
+                    this.settings.maxTokens
+            });
+        }
+
+        throw new Error(
+            'OpenRouter providerda complete/chat funksiyasi topilmadi.'
+        );
+    }
+
+    parseDecision(
+        response
+    ) {
+
+        if (
+            response &&
+            typeof response ===
+            'object'
+        ) {
+
+            if (
+                response.reply ||
+                response.actions
+            ) {
+
+                return {
+
+                    reply:
+                        response.reply ||
+                        '',
+
+                    actions:
+                        Array.isArray(
+                            response.actions
+                        )
+                            ? response.actions
+                            : [],
+
+                    memory:
+                        Array.isArray(
+                            response.memory
+                        )
+                            ? response.memory
+                            : [],
+
+                    observation_request:
+                        response.observation_request ||
+                        null,
+
+                    reason:
+                        response.reason ||
+                        null
+                };
+            }
+
+            if (
+                response.choices &&
+                response.choices[0]
+            ) {
+
+                const content =
+                    response
+                        .choices[0]
+                        .message
+                        ?.content;
+
+                return this.parseDecision(
+                    content
+                );
+            }
+        }
+
+        let text =
+            String(
+                response || ''
+            ).trim();
+
+        text =
+            text
+                .replace(
+                    /^```json/i,
+                    ''
+                )
+                .replace(
+                    /^```/i,
+                    ''
+                )
+                .replace(
+                    /```$/i,
+                    ''
+                )
+                .trim();
+
+        try {
+
+            const parsed =
+                JSON.parse(
+                    text
+                );
+
+            return {
+
+                reply:
+                    parsed.reply ||
+                    '',
+
+                actions:
+                    Array.isArray(
+                        parsed.actions
+                    )
+                        ? parsed.actions
+                        : [],
+
+                memory:
+                    Array.isArray(
+                        parsed.memory
+                    )
+                        ? parsed.memory
+                        : [],
+
+                observation_request:
+                    parsed.observation_request ||
+                    null,
+
+                reason:
+                    parsed.reason ||
+                    null
+            };
+
+        } catch (error) {
+
+            return {
+
+                reply:
+                    text,
+
+                actions: [],
+
+                memory: [],
+
+                observation_request:
+                    null,
+
+                reason:
+                    'AI JSON qaytarmadi.'
+            };
+        }
+    }
+
+    async executeActions(
+        actions
+    ) {
+
+        if (
+            !Array.isArray(actions)
+        ) {
+
+            return [];
+        }
+
+        const results = [];
+
+        const sorted =
+            actions
+                .slice()
+                .sort(
+                    (a, b) =>
+                        Number(
+                            a.priority || 5
+                        ) -
+                        Number(
+                            b.priority || 5
+                        )
+                );
+
+        for (
+            const action of sorted
+        ) {
+
+            if (
+                !action ||
+                !action.type
+            ) {
+
+                continue;
+            }
+
+            try {
+
+                const result =
+                    await this.dispatchAction(
+                        action
+                    );
+
+                results.push({
+
+                    action,
+
+                    result
+                });
+
+            } catch (error) {
+
+                results.push({
+
+                    action,
+
+                    result: {
+
+                        success: false,
+
+                        error:
+                            error.message
+                    }
+                });
+
+                context.eventBus.emitSafe(
+                    'ai:action_error',
+                    {
+
+                        action,
+
+                        error:
+                            error.message
+                    }
+                );
+            }
+        }
+
+        return results;
+    }
+
+    async dispatchAction(
+        action
+    ) {
+
+        const type =
+            String(
+                action.type
+            )
+                .toLowerCase()
+                .trim();
+
+        switch (type) {
+
+            case 'move':
+                return this.dispatch(
+                    'movement',
+                    action.parameters
+                );
+
+            case 'attack':
+                return this.dispatch(
+                    'combat',
+                    {
+                        type:
+                            'attack',
+
+                        ...(
+                            action.parameters ||
+                            {}
+                        )
+                    }
+                );
+
+            case 'build':
+                return this.dispatch(
+                    'build',
+                    {
+                        type:
+                            'build',
+
+                        ...(
+                            action.parameters ||
+                            {}
+                        )
+                    }
+                );
+
+            case 'break':
+                return this.dispatch(
+                    'build',
+                    {
+                        type:
+                            'break',
+
+                        ...(
+                            action.parameters ||
+                            {}
+                        )
+                );
+
+            case 'chat':
+                return this.dispatch(
+                    'chat',
+                    action.parameters
+                );
+
+            case 'observe':
+                return this.dispatch(
+                    'observer',
+                    action.parameters
+                );
+
+            case 'follow':
+                return this.dispatch(
+                    'follow',
+                    action.parameters
+                );
+
+            case 'defend':
+                return this.dispatch(
+                    'combat',
+                    {
+                        type:
+                            'defend',
+
+                        ...(
+                            action.parameters ||
+                            {}
+                        )
+                    }
+                );
+
+            case 'retreat':
+                return this.dispatch(
+                    'combat',
+                    {
+                        type:
+                            'retreat',
+
+                        ...(
+                            action.parameters ||
+                            {}
+                        )
+                    }
+                );
+
+            case 'wait':
+                return {
+
+                    success: true,
+
+                    waited:
+                        Number(
+                            action.parameters
+                                ?.milliseconds ||
+                            1000
+                        )
+                };
+
+            case 'remember':
+
+                return this.dispatch(
+                    'memory',
+                    action.parameters
+                );
+
+            default:
+
+                return {
+
+                    success: false,
+
+                    error:
+                        `Noma'lum action: ${type}`
+                };
+        }
+    }
+
+    async dispatch(
+        service,
+        parameters
+    ) {
+
+        let module =
+            context.get(
+                service
+            );
+
+        if (
+            !module
+        ) {
+
+            const aliases = {
+
+                movement:
+                    [
+                        'movement-engine',
+                        'movement'
+                    ],
+
+                combat:
+                    [
+                        'combat',
+                        'combat-engine'
+                    ],
+
+                build:
+                    [
+                        'build',
+                        'build-engine'
+                    ],
+
+                observer:
+                    [
+                        'world-observer',
+                        'observer'
+                    ],
+
+                chat:
+                    [
+                        'chat-engine',
+                        'chat'
+                    ],
+
+                memory:
+                    [
+                        'memory-manager',
+                        'memory'
+                    ],
+
+                follow:
+                    [
+                        'follow-engine',
+                        'follow'
+                    ]
+            };
+
+            const list =
+                aliases[service] ||
+                [];
+
+            for (
+                const name of list
+            ) {
+
+                module =
+                    context.get(
+                        name
+                    );
+
+                if (
+                    module
+                ) {
+                    break;
+                }
+            }
+        }
+
+        if (
+            !module
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    `Service topilmadi: ${service}`
+            };
+        }
+
+        if (
+            typeof module.execute ===
+            'function'
+        ) {
+
+            return module.execute(
+                parameters || {}
+            );
+        }
+
+        if (
+            typeof module.handle ===
+            'function'
+        ) {
+
+            return module.handle(
+                parameters || {}
+            );
+        }
+
+        return {
+
+            success: false,
+
+            error:
+                `${service} modulida execute/handle yo‘q.`
+        };
+    }
+
+    recordDecision(
+        entry
+    ) {
+
+        this.decisionHistory.push(
+            entry
+        );
+
+        if (
+            this.decisionHistory.length >
+            this.maxDecisionHistory
+        ) {
+
+            this.decisionHistory.splice(
+                0,
+                this.decisionHistory.length -
+                this.maxDecisionHistory
+            );
+        }
+
+        context.eventBus.emitSafe(
+            'ai:decision_recorded',
+            entry
+        );
+    }
+
+    getDecisionHistory(
+        limit = 50
+    ) {
+
+        return this.decisionHistory.slice(
+            -Math.max(
+                1,
+                Number(limit) || 50
+            )
+        );
+    }
+
+    getLastDecision() {
+
+        return this.lastDecision;
+    }
+
+    getLastThought() {
+
+        return this.lastThought;
+    }
+
+    status() {
+
+        return {
+
+            running:
+                this.running,
+
+            busy:
+                this.busy,
+
+            thinking:
+                this.thinking,
+
+            autonomous:
+                this.autonomous,
+
+            lastDecision:
+                this.lastDecision,
+
+            lastError:
+                this.lastError,
+
+            history:
+                this.decisionHistory.length,
+
+            settings:
+                {
+                    ...this.settings
+                }
+        };
+    }
+
+    limitArray(
+        array,
+        limit
+    ) {
+
+        if (
+            !Array.isArray(array)
+        ) {
+
+            return [];
+        }
+
+        return array.slice(
+            -Math.max(
+                1,
+                Number(limit) || 1
+            )
+        );
+    }
+
+    safeJSON(
+        value
+    ) {
+
+        try {
+
+            return JSON.stringify(
+                value,
+                null,
+                2
+            );
+
+        } catch (error) {
+
+            return String(
+                value
+            );
+        }
+    }
+}
+
+const brain =
+    new AIBrain();
+
+module.exports =
+    brain;
+
+module.exports.AIBrain =
+    AIBrain;
