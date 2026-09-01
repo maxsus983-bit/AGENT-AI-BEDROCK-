@@ -1,5 +1,8 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+
 const config = require('../config');
 const logger = require('./logger');
 const eventBus = require('./event-bus');
@@ -50,23 +53,17 @@ class AgentContext {
 
     get(name) {
 
-        return this.modules.get(
-            name
-        ) || null;
+        return this.modules.get(name) || null;
     }
 
     has(name) {
 
-        return this.modules.has(
-            name
-        );
+        return this.modules.has(name);
     }
 
     remove(name) {
 
-        return this.modules.delete(
-            name
-        );
+        return this.modules.delete(name);
     }
 
     listModules() {
@@ -78,13 +75,16 @@ class AgentContext {
 
     start() {
 
+        if (this.running) {
+            return;
+        }
+
         this.running = true;
 
         this.eventBus.emitSafe(
             'system:started',
             {
-                timestamp:
-                    Date.now()
+                timestamp: Date.now()
             }
         );
 
@@ -95,13 +95,16 @@ class AgentContext {
 
     stop() {
 
+        if (!this.running) {
+            return;
+        }
+
         this.running = false;
 
         this.eventBus.emitSafe(
             'system:stopped',
             {
-                timestamp:
-                    Date.now()
+                timestamp: Date.now()
             }
         );
 
@@ -112,10 +115,7 @@ class AgentContext {
 
     uptime() {
 
-        return (
-            Date.now() -
-            this.startedAt
-        );
+        return Date.now() - this.startedAt;
     }
 
     snapshot() {
@@ -132,10 +132,14 @@ class AgentContext {
                 this.listModules(),
 
             state:
-                this.state.snapshot(),
+                typeof this.state.snapshot === 'function'
+                    ? this.state.snapshot()
+                    : this.state,
 
             events:
-                this.eventBus.health()
+                typeof this.eventBus.health === 'function'
+                    ? this.eventBus.health()
+                    : null
         };
     }
 }
