@@ -1,0 +1,1458 @@
+'use strict';
+
+const context = require('../core/agent-context');
+const logger = require('../core/logger');
+
+class WorldReport {
+
+    constructor() {
+
+        this.maxEvents = 100;
+
+        this.maxPlayers = 100;
+
+        this.maxMessages = 100;
+
+        this.history = [];
+
+        this.lastReport = null;
+
+        this.lastReportAt = null;
+
+        this.watchMode = {
+            enabled: false,
+            target: null,
+            hidden: false,
+            continuous: false
+        };
+
+        context.register(
+            'world-report',
+            this
+        );
+    }
+
+    enableWatch(options = {}) {
+
+        this.watchMode.enabled = true;
+
+        this.watchMode.target =
+            options.target || null;
+
+        this.watchMode.hidden =
+            Boolean(
+                options.hidden
+            );
+
+        this.watchMode.continuous =
+            options.continuous !== false;
+
+        return this.status();
+    }
+
+    disableWatch() {
+
+        this.watchMode = {
+
+            enabled: false,
+
+            target: null,
+
+            hidden: false,
+
+            continuous: false
+        };
+
+        return this.status();
+    }
+
+    setTarget(target) {
+
+        this.watchMode.target =
+            target || null;
+
+        return this.watchMode.target;
+    }
+
+    async createReport(options = {}) {
+
+        const snapshot =
+            await this.collectSnapshot();
+
+        const report =
+            this.formatReport(
+                snapshot,
+                options
+            );
+
+        this.lastReport =
+            report;
+
+        this.lastReportAt =
+            Date.now();
+
+        this.history.push({
+
+            timestamp:
+                Date.now(),
+
+            report,
+
+            snapshot
+        });
+
+        if (
+            this.history.length >
+            this.maxEvents
+        ) {
+
+            this.history.splice(
+                0,
+                this.history.length -
+                this.maxEvents
+            );
+        }
+
+        return report;
+    }
+
+    async collectSnapshot() {
+
+        const snapshot = {
+
+            timestamp:
+                Date.now(),
+
+            bot: null,
+
+            players: [],
+
+            world: null,
+
+            events: [],
+
+            chat: []
+        };
+
+        const state =
+            context.get(
+                'state'
+            );
+
+        if (
+            state &&
+            typeof state.get ===
+            'function'
+        ) {
+
+            try {
+
+                snapshot.bot =
+                    await state.get();
+
+            } catch (error) {
+
+                logger.warn(
+                    `WorldReport state xatosi: ${error.message}`
+                );
+            }
+        }
+
+        const tracker =
+            context.get(
+                'player-tracker'
+            );
+
+        if (tracker) {
+
+            try {
+
+                if (
+                    typeof tracker.getSnapshot ===
+                    'function'
+                ) {
+
+                    snapshot.players =
+                        await tracker.getSnapshot();
+
+                } else if (
+                    typeof tracker.list ===
+                    'function'
+                ) {
+
+                    snapshot.players =
+                        await tracker.list();
+                }
+
+            } catch (error) {
+
+                logger.warn(
+                    `WorldReport player tracker xatosi: ${error.message}`
+                );
+            }
+        }
+
+        const observer =
+            context.get(
+                'world-observer'
+            );
+
+        if (observer) {
+
+            try {
+
+                if (
+                    typeof observer.getSnapshot ===
+                    'function'
+                ) {
+
+                    snapshot.world =
+                        await observer.getSnapshot();
+
+                } else if (
+                    typeof observer.snapshot ===
+                    'function'
+                ) {
+
+                    snapshot.world =
+                        await observer.snapshot();
+                }
+
+            } catch (error) {
+
+                logger.warn(
+                    `WorldReport world observer xatosi: ${error.message}`
+                );
+            }
+        }
+
+        const eventObserver =
+            context.get(
+                'event-observer'
+            );
+
+        if (eventObserver) {
+
+            try {
+
+                if (
+                    typeof eventObserver.getRecent ===
+                    'function'
+                ) {
+
+                    snapshot.events =
+                        await eventObserver.getRecent(
+                            this.maxEvents
+                        );
+                }
+
+            } catch (error) {
+
+                logger.warn(
+                    `WorldReport event observer xatosi: ${error.message}`
+                );
+            }
+        }
+
+        snapshot.chat =
+            this.extractChat(
+                snapshot.events
+            );
+
+        snapshot.players =
+            Array.isArray(
+                snapshot.players
+            )
+                ? snapshot.players.slice(
+                    0,
+                    this.maxPlayers
+                )
+                : [];
+
+        snapshot.events =
+            Array.isArray(
+                snapshot.events
+            )
+                ? snapshot.events.slice(
+                    -this.maxEvents
+                )
+                : [];
+
+        return snapshot;
+    }
+
+    formatReport(
+        snapshot,
+        options = {}
+    ) {
+
+        const lines = [];
+
+        const detailed =
+            options.detailed !== false;
+
+        const includeCoordinates =
+            options.coordinates !== false;
+
+        lines.push(
+            '══════════════════════════════'
+        );
+
+        lines.push(
+            '🤖 MINECRAFT DUNYO HISOBOTI'
+        );
+
+        lines.push(
+            `🕐 ${this.formatTime(
+                snapshot.timestamp
+            )}`
+        );
+
+        lines.push(
+            '══════════════════════════════'
+        );
+
+        /*
+        BOT HOLATI
+        */
+
+        lines.push('');
+
+        lines.push(
+            '🤖 BOT HOLATI'
+        );
+
+        if (
+            snapshot.bot
+        ) {
+
+            const bot =
+                snapshot.bot;
+
+            if (
+                bot.name
+            ) {
+
+                lines.push(
+                    `👤 Ism: ${bot.name}`
+                );
+            }
+
+            if (
+                bot.dimension
+            ) {
+
+                lines.push(
+                    `🌍 Dimension: ${bot.dimension}`
+                );
+            }
+
+            const position =
+                this.getPosition(
+                    bot
+                );
+
+            if (
+                position &&
+                includeCoordinates
+            ) {
+
+                lines.push(
+                    `📍 Joylashuv: ${this.formatPosition(
+                        position
+                    )}`
+                );
+            }
+
+            if (
+                bot.health !==
+                undefined
+            ) {
+
+                lines.push(
+                    `❤️ HP: ${bot.health}${
+                        bot.maxHealth
+                            ? `/${bot.maxHealth}`
+                            : ''
+                    }`
+                );
+            }
+
+            if (
+                bot.food !==
+                undefined
+            ) {
+
+                lines.push(
+                    `🍖 Ochlik: ${bot.food}`
+                );
+            }
+
+        } else {
+
+            lines.push(
+                'ℹ️ Bot holati hozircha olinmadi.'
+            );
+        }
+
+        /*
+        PLAYERLAR
+        */
+
+        lines.push('');
+
+        lines.push(
+            `👥 PLAYERLAR (${snapshot.players.length})`
+        );
+
+        if (
+            snapshot.players.length === 0
+        ) {
+
+            lines.push(
+                'Hozir kuzatilgan player yo‘q.'
+            );
+
+        } else {
+
+            for (
+                const player of
+                snapshot.players
+            ) {
+
+                lines.push(
+                    this.formatPlayer(
+                        player,
+                        includeCoordinates
+                    )
+                );
+            }
+        }
+
+        /*
+        CHAT
+        */
+
+        lines.push('');
+
+        lines.push(
+            `💬 CHAT (${snapshot.chat.length})`
+        );
+
+        if (
+            snapshot.chat.length === 0
+        ) {
+
+            lines.push(
+                'Yangi chat xabari aniqlanmadi.'
+            );
+
+        } else {
+
+            for (
+                const message of
+                snapshot.chat
+            ) {
+
+                lines.push(
+                    this.formatChat(
+                        message
+                    )
+                );
+            }
+        }
+
+        /*
+        VOQEALAR
+        */
+
+        lines.push('');
+
+        lines.push(
+            '📋 MUHIM VOQEALAR'
+        );
+
+        const important =
+            this.getImportantEvents(
+                snapshot.events
+            );
+
+        if (
+            important.length === 0
+        ) {
+
+            lines.push(
+                'Muhim voqea aniqlanmadi.'
+            );
+
+        } else {
+
+            for (
+                const event of
+                important
+            ) {
+
+                lines.push(
+                    this.formatEvent(
+                        event,
+                        includeCoordinates
+                    )
+                );
+            }
+        }
+
+        /*
+        WATCH MODE
+        */
+
+        if (
+            this.watchMode.enabled
+        ) {
+
+            lines.push('');
+
+            lines.push(
+                '👁️ KUZATUV REJIMI'
+            );
+
+            lines.push(
+                `Holat: faol`
+            );
+
+            if (
+                this.watchMode.target
+            ) {
+
+                lines.push(
+                    `Nishon: ${this.watchMode.target}`
+                );
+
+            } else {
+
+                lines.push(
+                    'Nishon: umumiy dunyo'
+                );
+            }
+
+            if (
+                this.watchMode.hidden
+            ) {
+
+                lines.push(
+                    'Rejim: maxsus yashirin kuzatuv'
+                );
+            }
+
+            if (
+                this.watchMode.continuous
+            ) {
+
+                lines.push(
+                    'Davomiy hisobot: yoqilgan'
+                );
+            }
+        }
+
+        /*
+        QISQA AI XULOSA
+        */
+
+        if (detailed) {
+
+            lines.push('');
+
+            lines.push(
+                '🧠 AI XULOSA'
+            );
+
+            lines.push(
+                this.generateSummary(
+                    snapshot
+                )
+            );
+        }
+
+        lines.push('');
+
+        lines.push(
+            '══════════════════════════════'
+        );
+
+        return lines.join('\n');
+    }
+
+    formatPlayer(
+        player,
+        includeCoordinates
+    ) {
+
+        const name =
+            player.name ||
+            player.username ||
+            player.id ||
+            'Noma’lum player';
+
+        const parts = [
+            `👤 ${name}`
+        ];
+
+        const position =
+            this.getPosition(
+                player
+            );
+
+        if (
+            position &&
+            includeCoordinates
+        ) {
+
+            parts.push(
+                `📍 ${this.formatPosition(
+                    position
+                )}`
+            );
+        }
+
+        if (
+            player.health !==
+            undefined
+        ) {
+
+            parts.push(
+                `❤️ ${player.health}`
+            );
+        }
+
+        if (
+            player.dimension
+        ) {
+
+            parts.push(
+                `🌍 ${player.dimension}`
+            );
+        }
+
+        if (
+            player.distance !==
+            undefined
+        ) {
+
+            parts.push(
+                `📏 ${this.formatDistance(
+                    player.distance
+                )}`
+            );
+        }
+
+        if (
+            player.action
+        ) {
+
+            parts.push(
+                `⚡ ${this.translateAction(
+                    player.action
+                )}`
+            );
+        }
+
+        if (
+            player.heldItem
+        ) {
+
+            parts.push(
+                `🖐️ ${player.heldItem}`
+            );
+        }
+
+        return parts.join(' | ');
+    }
+
+    formatChat(
+        message
+    ) {
+
+        if (!message) {
+            return '💬 [noma’lum xabar]';
+        }
+
+        const sender =
+            message.sender ||
+            message.player ||
+            message.name ||
+            'Noma’lum';
+
+        const text =
+            message.message ||
+            message.text ||
+            message.content ||
+            '';
+
+        return (
+            `💬 ${sender}: ${text}`
+        );
+    }
+
+    formatEvent(
+        event,
+        includeCoordinates
+    ) {
+
+        if (!event) {
+            return '• Noma’lum voqea';
+        }
+
+        const type =
+            String(
+                event.type ||
+                event.event ||
+                'unknown'
+            ).toLowerCase();
+
+        const actor =
+            event.player ||
+            event.playerName ||
+            event.source ||
+            '';
+
+        const target =
+            event.target ||
+            event.targetName ||
+            '';
+
+        let text;
+
+        switch (type) {
+
+            case 'join':
+            case 'player_join':
+            case 'player_joined':
+
+                text =
+                    `🟢 ${actor || 'Player'} serverga kirdi.`;
+
+                break;
+
+            case 'leave':
+            case 'player_leave':
+            case 'player_left':
+
+                text =
+                    `🔴 ${actor || 'Player'} serverdan chiqdi.`;
+
+                break;
+
+            case 'chat':
+            case 'message':
+
+                text =
+                    this.formatChat(
+                        event
+                    );
+
+                break;
+
+            case 'attack':
+            case 'hit':
+            case 'damage':
+
+                text =
+                    `⚔️ ${actor || 'Noma’lum'} ` +
+                    `→ ${target || 'nishon'}ga hujum qildi.`;
+
+                break;
+
+            case 'death':
+            case 'player_death':
+
+                text =
+                    `☠️ ${actor || target || 'Player'} halok bo‘ldi.`;
+
+                break;
+
+            case 'block_break':
+            case 'break':
+
+                text =
+                    `⛏️ ${actor || 'Player'} ` +
+                    `${event.block || 'block'} buzdi.`;
+
+                break;
+
+            case 'block_place':
+            case 'place':
+
+                text =
+                    `🧱 ${actor || 'Player'} ` +
+                    `${event.block || 'block'} qo‘ydi.`;
+
+                break;
+
+            case 'move':
+            case 'movement':
+
+                text =
+                    `🚶 ${actor || 'Player'} harakatlandi.`;
+
+                break;
+
+            case 'item_pickup':
+            case 'pickup':
+
+                text =
+                    `📦 ${actor || 'Player'} ` +
+                    `${event.item || 'item'} oldi.`;
+
+                break;
+
+            case 'item_drop':
+            case 'drop':
+
+                text =
+                    `📤 ${actor || 'Player'} ` +
+                    `${event.item || 'item'} tashladi.`;
+
+                break;
+
+            case 'container_open':
+
+                text =
+                    `📦 ${actor || 'Player'} ` +
+                    `container ochdi.`;
+
+                break;
+
+            case 'craft':
+
+                text =
+                    `🔨 ${actor || 'Player'} ` +
+                    `craft qildi.`;
+
+                break;
+
+            case 'eat':
+
+                text =
+                    `🍎 ${actor || 'Player'} ovqat yedi.`;
+
+                break;
+
+            case 'sleep':
+
+                text =
+                    `🛏️ ${actor || 'Player'} uxladi.`;
+
+                break;
+
+            case 'dimension':
+
+                text =
+                    `🌌 ${actor || 'Player'} ` +
+                    `dimension almashtirdi.`;
+
+                break;
+
+            case 'build':
+
+                text =
+                    `🏗️ ${actor || 'Player'} ` +
+                    `qurilish bajardi.`;
+
+                break;
+
+            default:
+
+                text =
+                    `ℹ️ ${actor ? actor + ': ' : ''}` +
+                    `${event.message || event.description || type}`;
+        }
+
+        const position =
+            this.getPosition(
+                event
+            );
+
+        if (
+            position &&
+            includeCoordinates
+        ) {
+
+            text +=
+                ` | 📍 ${this.formatPosition(
+                    position
+                )}`;
+        }
+
+        return text;
+    }
+
+    getImportantEvents(
+        events
+    ) {
+
+        if (
+            !Array.isArray(events)
+        ) {
+
+            return [];
+        }
+
+        const importantTypes =
+            new Set([
+
+                'join',
+                'leave',
+
+                'player_join',
+                'player_left',
+
+                'chat',
+                'message',
+
+                'attack',
+                'hit',
+                'damage',
+
+                'death',
+                'player_death',
+
+                'block_place',
+                'place',
+
+                'block_break',
+                'break',
+
+                'craft',
+
+                'item_pickup',
+                'pickup',
+
+                'item_drop',
+                'drop',
+
+                'container_open',
+
+                'dimension',
+
+                'build'
+            ]);
+
+        return events
+            .filter(
+                event => {
+
+                    if (!event) {
+                        return false;
+                    }
+
+                    const type =
+                        String(
+                            event.type ||
+                            event.event ||
+                            ''
+                        ).toLowerCase();
+
+                    return importantTypes.has(
+                        type
+                    );
+                }
+            )
+            .slice(
+                -this.maxEvents
+            );
+    }
+
+    extractChat(
+        events
+    ) {
+
+        if (
+            !Array.isArray(events)
+        ) {
+
+            return [];
+        }
+
+        return events
+            .filter(
+                event => {
+
+                    const type =
+                        String(
+                            event?.type ||
+                            event?.event ||
+                            ''
+                        ).toLowerCase();
+
+                    return (
+                        type === 'chat' ||
+                        type === 'message'
+                    );
+                }
+            )
+            .slice(
+                -this.maxMessages
+            );
+    }
+
+    generateSummary(
+        snapshot
+    ) {
+
+        const parts = [];
+
+        const playerCount =
+            Array.isArray(
+                snapshot.players
+            )
+                ? snapshot.players.length
+                : 0;
+
+        parts.push(
+            `Hozir ${playerCount} ta kuzatilgan player bor.`
+        );
+
+        const chats =
+            snapshot.chat.length;
+
+        if (
+            chats > 0
+        ) {
+
+            parts.push(
+                `${chats} ta chat xabari qayd etildi.`
+            );
+        }
+
+        const events =
+            snapshot.events.length;
+
+        if (
+            events > 0
+        ) {
+
+            parts.push(
+                `${events} ta kuzatuv hodisasi mavjud.`
+            );
+        }
+
+        const fights =
+            snapshot.events.filter(
+                event => {
+
+                    const type =
+                        String(
+                            event?.type ||
+                            ''
+                        ).toLowerCase();
+
+                    return [
+                        'attack',
+                        'hit',
+                        'damage'
+                    ].includes(type);
+                }
+            ).length;
+
+        if (
+            fights > 0
+        ) {
+
+            parts.push(
+                `${fights} ta jang/hujum hodisasi qayd etildi.`
+            );
+        }
+
+        const building =
+            snapshot.events.filter(
+                event => {
+
+                    const type =
+                        String(
+                            event?.type ||
+                            ''
+                        ).toLowerCase();
+
+                    return [
+                        'block_place',
+                        'place',
+                        'build'
+                    ].includes(type);
+                }
+            ).length;
+
+        if (
+            building > 0
+        ) {
+
+            parts.push(
+                `${building} ta qurilish hodisasi qayd etildi.`
+            );
+        }
+
+        return parts.join(' ');
+    }
+
+    getPosition(
+        object
+    ) {
+
+        if (!object) {
+            return null;
+        }
+
+        if (
+            object.position &&
+            typeof object.position ===
+            'object'
+        ) {
+
+            return object.position;
+        }
+
+        if (
+            object.pos &&
+            typeof object.pos ===
+            'object'
+        ) {
+
+            return object.pos;
+        }
+
+        if (
+            object.location &&
+            typeof object.location ===
+            'object'
+        ) {
+
+            return object.location;
+        }
+
+        if (
+            object.x !== undefined &&
+            object.y !== undefined &&
+            object.z !== undefined
+        ) {
+
+            return {
+
+                x:
+                    object.x,
+
+                y:
+                    object.y,
+
+                z:
+                    object.z
+            };
+        }
+
+        return null;
+    }
+
+    formatPosition(
+        position
+    ) {
+
+        if (!position) {
+            return 'noma’lum';
+        }
+
+        const x =
+            this.round(
+                position.x
+            );
+
+        const y =
+            this.round(
+                position.y
+            );
+
+        const z =
+            this.round(
+                position.z
+            );
+
+        return (
+            `X:${x} Y:${y} Z:${z}`
+        );
+    }
+
+    formatDistance(
+        distance
+    ) {
+
+        const value =
+            Number(distance);
+
+        if (
+            !Number.isFinite(value)
+        ) {
+
+            return 'noma’lum';
+        }
+
+        if (
+            value < 1
+        ) {
+
+            return '<1 block';
+        }
+
+        return (
+            `${Math.round(value)} block`
+        );
+    }
+
+    translateAction(
+        action
+    ) {
+
+        const value =
+            String(
+                action
+            ).toLowerCase();
+
+        const map = {
+
+            idle:
+                'kutmoqda',
+
+            walking:
+                'yuryapti',
+
+            running:
+                'yuguryapti',
+
+            sprinting:
+                'sprint qilyapti',
+
+            jumping:
+                'sakrayapti',
+
+            sneaking:
+                'sneak qilyapti',
+
+            attacking:
+                'hujum qilyapti',
+
+            mining:
+                'block buzmoqda',
+
+            building:
+                'qurmoqda',
+
+            eating:
+                'ovqatlanyapti',
+
+            sleeping:
+                'uxlayapti',
+
+            swimming:
+                'suzmoqda',
+
+            climbing:
+                'ko‘tarilyapti'
+        };
+
+        return (
+            map[value] ||
+            action
+        );
+    }
+
+    formatTime(
+        timestamp
+    ) {
+
+        try {
+
+            return new Date(
+                timestamp
+            ).toLocaleString();
+
+        } catch (_) {
+
+            return 'noma’lum vaqt';
+        }
+    }
+
+    round(
+        value
+    ) {
+
+        const number =
+            Number(value);
+
+        if (
+            !Number.isFinite(
+                number
+            )
+        ) {
+
+            return '?';
+        }
+
+        return Math.round(
+            number * 10
+        ) / 10;
+    }
+
+    async getTargetReport(
+        target,
+        options = {}
+    ) {
+
+        const snapshot =
+            await this.collectSnapshot();
+
+        const wanted =
+            String(
+                target
+            ).toLowerCase();
+
+        const player =
+            snapshot.players.find(
+                item => {
+
+                    const name =
+                        String(
+                            item?.name ||
+                            item?.username ||
+                            item?.id ||
+                            ''
+                        ).toLowerCase();
+
+                    return (
+                        name === wanted ||
+                        name.includes(wanted)
+                    );
+                }
+            );
+
+        if (!player) {
+
+            return (
+                `👁️ "${target}" hozir kuzatuv ma’lumotlarida topilmadi.`
+            );
+        }
+
+        const lines = [];
+
+        lines.push(
+            `👁️ KUZATUV: ${target}`
+        );
+
+        lines.push(
+            this.formatPlayer(
+                player,
+                options.coordinates !== false
+            )
+        );
+
+        const related =
+            snapshot.events.filter(
+                event => {
+
+                    const actor =
+                        String(
+                            event?.player ||
+                            event?.playerName ||
+                            event?.source ||
+                            ''
+                        ).toLowerCase();
+
+                    const targetName =
+                        String(
+                            event?.target ||
+                            event?.targetName ||
+                            ''
+                        ).toLowerCase();
+
+                    return (
+                        actor.includes(wanted) ||
+                        targetName.includes(wanted)
+                    );
+                }
+            ).slice(
+                -20
+            );
+
+        if (
+            related.length
+        ) {
+
+            lines.push('');
+
+            lines.push(
+                'So‘nggi harakatlari:'
+            );
+
+            for (
+                const event of
+                related
+            ) {
+
+                lines.push(
+                    `• ${this.formatEvent(
+                        event,
+                        options.coordinates !== false
+                    )}`
+                );
+            }
+
+        } else {
+
+            lines.push(
+                'So‘nggi kuzatilgan harakati aniqlanmadi.'
+            );
+        }
+
+        return lines.join('\n');
+    }
+
+    getHistory(
+        limit = 20
+    ) {
+
+        const amount =
+            Math.max(
+                1,
+                Number(limit) || 20
+            );
+
+        return this.history.slice(
+            -amount
+        );
+    }
+
+    status() {
+
+        return {
+
+            watch:
+                {
+                    ...this.watchMode
+                },
+
+            history:
+                this.history.length,
+
+            lastReportAt:
+                this.lastReportAt,
+
+            hasLastReport:
+                Boolean(
+                    this.lastReport
+                )
+        };
+    }
+}
+
+const worldReport =
+    new WorldReport();
+
+module.exports =
+    worldReport;
+
+module.exports.WorldReport =
+    WorldReport;
