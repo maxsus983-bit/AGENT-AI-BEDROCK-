@@ -1,0 +1,1416 @@
+'use strict';
+
+const context = require('../core/agent-context');
+const logger = require('../core/logger');
+
+class PlayerTracker {
+
+    constructor() {
+
+        this.running = false;
+
+        this.players = new Map();
+
+        this.watchList = new Set();
+
+        this.globalWatch = false;
+
+        this.hiddenWatch = false;
+
+        this.events = [];
+
+        this.maxEvents = 50000;
+
+        this.updateInterval = 1000;
+
+        this.timer = null;
+
+        this.lastSnapshot = null;
+
+        this.settings = {
+
+            trackPosition: true,
+
+            trackHealth: true,
+
+            trackMovement: true,
+
+            trackCombat: true,
+
+            trackChat: true,
+
+            trackInteractions: true,
+
+            trackJoinLeave: true,
+
+            trackLookDirection: true,
+
+            reportImportantEvents: true,
+
+            reportAllMovement:
+                true
+        };
+
+        context.register(
+            'player-tracker',
+            this
+        );
+    }
+
+    start() {
+
+        if (
+            this.running
+        ) {
+            return;
+        }
+
+        this.running = true;
+
+        this.startLoop();
+
+        logger.info(
+            'Player Tracker ishga tushdi.'
+        );
+
+        context.eventBus.emitSafe(
+            'players:tracker_started',
+            {}
+        );
+    }
+
+    stop() {
+
+        this.running = false;
+
+        this.stopLoop();
+
+        logger.info(
+            'Player Tracker to‘xtatildi.'
+        );
+
+        context.eventBus.emitSafe(
+            'players:tracker_stopped',
+            {}
+        );
+    }
+
+    startLoop() {
+
+        this.stopLoop();
+
+        this.timer =
+            setInterval(
+                () => {
+
+                    this.scan()
+                        .catch(
+                            error => {
+
+                                logger.error(
+                                    `Player Tracker scan xatosi: ${error.message}`
+                                );
+                            }
+                        );
+
+                },
+                this.updateInterval
+            );
+    }
+
+    stopLoop() {
+
+        if (
+            this.timer
+        ) {
+
+            clearInterval(
+                this.timer
+            );
+
+            this.timer =
+                null;
+        }
+    }
+
+    async scan() {
+
+        if (
+            !this.running
+        ) {
+            return;
+        }
+
+        const observer =
+            this.getObserver();
+
+        if (
+            !observer
+        ) {
+
+            return;
+        }
+
+        let players = [];
+
+        try {
+
+            if (
+                typeof observer.getPlayers ===
+                'function'
+            ) {
+
+                players =
+                    await observer.getPlayers();
+
+            } else if (
+                typeof observer.getNearbyPlayers ===
+                'function'
+            ) {
+
+                players =
+                    await observer.getNearbyPlayers(
+                        null,
+                        128
+                    );
+            }
+
+        } catch (error) {
+
+            logger.warn(
+                `Playerlarni olishda xato: ${error.message}`
+            );
+
+            return;
+        }
+
+        if (
+            !Array.isArray(players)
+        ) {
+
+            players = [];
+        }
+
+        const now =
+            Date.now();
+
+        const currentNames =
+            new Set();
+
+        for (
+            const rawPlayer of
+            players
+        ) {
+
+            if (
+                !rawPlayer
+            ) {
+                continue;
+            }
+
+            const player =
+                this.normalizePlayer(
+                    rawPlayer
+                );
+
+            if (
+                !player.name
+            ) {
+                continue;
+            }
+
+            currentNames.add(
+                player.name
+            );
+
+            await this.processPlayer(
+                player,
+                now
+            );
+        }
+
+        await this.detectLeftPlayers(
+            currentNames,
+            now
+        );
+
+        this.lastSnapshot = {
+
+            timestamp:
+                now,
+
+            playerCount:
+                currentNames.size,
+
+            players:
+                Array.from(
+                    currentNames
+                )
+        };
+    }
+
+    async processPlayer(
+        player,
+        timestamp
+    ) {
+
+        const previous =
+            this.players.get(
+                player.name
+            );
+
+        if (
+            !previous
+        ) {
+
+            const record = {
+
+                ...player,
+
+                firstSeen:
+                    timestamp,
+
+                lastSeen:
+                    timestamp,
+
+                online:
+                    true,
+
+                movement:
+                    null,
+
+                distanceTravelled:
+                    0,
+
+                interactionCount:
+                    0,
+
+                attackCount:
+                    0,
+
+                lastEvent:
+                    'join'
+            };
+
+            this.players.set(
+                player.name,
+                record
+            );
+
+            this.addEvent({
+
+                type:
+                    'player_join',
+
+                player:
+                    player.name,
+
+                position:
+                    player.position,
+
+                timestamp
+            });
+
+            context.eventBus.emitSafe(
+                'player:joined',
+                record
+            );
+
+            await this.rememberPlayer(
+                record
+            );
+
+            return;
+        }
+
+        const updated = {
+
+            ...previous,
+
+            ...player,
+
+            online:
+                true,
+
+            lastSeen:
+                timestamp
+        };
+
+        if (
+            previous.position &&
+            player.position
+        ) {
+
+            const distance =
+                this.distance(
+                    previous.position,
+                    player.position
+                );
+
+            updated.lastMovementDistance =
+                distance;
+
+            if (
+                distance >
+                0.15
+            ) {
+
+                updated.distanceTravelled =
+                    Number(
+                        previous.distanceTravelled ||
+                        0
+                    ) +
+                    distance;
+
+                updated.movement = {
+
+                    from:
+                        previous.position,
+
+                    to:
+                        player.position,
+
+                    distance,
+
+                    timestamp
+                };
+
+                this.addEvent({
+
+                    type:
+                        'player_move',
+
+                    player:
+                        player.name,
+
+                    from:
+                        previous.position,
+
+                    to:
+                        player.position,
+
+                    distance,
+
+                    timestamp
+                });
+
+                context.eventBus.emitSafe(
+                    'player:moved',
+                    {
+
+                        player:
+                            player.name,
+
+                        from:
+                            previous.position,
+
+                        to:
+                            player.position,
+
+                        distance,
+
+                        timestamp
+                    }
+                );
+            }
+        }
+
+        if (
+            previous.health !==
+            player.health
+        ) {
+
+            this.addEvent({
+
+                type:
+                    'player_health_change',
+
+                player:
+                    player.name,
+
+                previous:
+                    previous.health,
+
+                current:
+                    player.health,
+
+                timestamp
+            });
+
+            context.eventBus.emitSafe(
+                'player:health_change',
+                {
+
+                    player:
+                        player.name,
+
+                    previous:
+                        previous.health,
+
+                    current:
+                        player.health
+                }
+            );
+        }
+
+        if (
+            this.lookChanged(
+                previous,
+                player
+            )
+        ) {
+
+            this.addEvent({
+
+                type:
+                    'player_look_change',
+
+                player:
+                    player.name,
+
+                previous:
+                    previous.rotation,
+
+                current:
+                    player.rotation,
+
+                timestamp
+            });
+        }
+
+        if (
+            this.detectCombat(
+                previous,
+                player
+            )
+        ) {
+
+            updated.attackCount =
+                Number(
+                    previous.attackCount ||
+                    0
+                ) + 1;
+
+            updated.lastEvent =
+                'combat';
+
+            this.addEvent({
+
+                type:
+                    'player_combat',
+
+                player:
+                    player.name,
+
+                position:
+                    player.position,
+
+                timestamp
+            });
+
+            context.eventBus.emitSafe(
+                'player:combat',
+                {
+
+                    player:
+                        player.name,
+
+                    position:
+                        player.position,
+
+                    timestamp
+                }
+            );
+        }
+
+        this.players.set(
+            player.name,
+            updated
+        );
+
+        const memory =
+            this.getMemory();
+
+        if (
+            memory &&
+            typeof memory.updatePlayer ===
+            'function'
+        ) {
+
+            memory.updatePlayer(
+                player.name,
+                updated
+            );
+        }
+    }
+
+    async detectLeftPlayers(
+        currentNames,
+        timestamp
+    ) {
+
+        for (
+            const [
+                name,
+                player
+            ] of
+            this.players.entries()
+        ) {
+
+            if (
+                !currentNames.has(
+                    name
+                ) &&
+                player.online
+            ) {
+
+                player.online =
+                    false;
+
+                player.lastSeen =
+                    timestamp;
+
+                player.lastEvent =
+                    'leave';
+
+                this.players.set(
+                    name,
+                    player
+                );
+
+                this.addEvent({
+
+                    type:
+                        'player_leave',
+
+                    player:
+                        name,
+
+                    lastPosition:
+                        player.position,
+
+                    timestamp
+                });
+
+                context.eventBus.emitSafe(
+                    'player:left',
+                    {
+
+                        player:
+                            name,
+
+                        lastPosition:
+                            player.position,
+
+                        timestamp
+                    }
+                );
+            }
+        }
+    }
+
+    normalizePlayer(
+        raw
+    ) {
+
+        return {
+
+            name:
+                String(
+                    raw.name ||
+                    raw.username ||
+                    raw.displayName ||
+                    ''
+                ).trim(),
+
+            position:
+                this.normalizePosition(
+                    raw.position ||
+                    raw.pos
+                ),
+
+            health:
+                this.toNumberOrNull(
+                    raw.health
+                ),
+
+            rotation:
+                this.normalizeRotation(
+                    raw.rotation ||
+                    raw.look
+                ),
+
+            velocity:
+                raw.velocity ||
+                null,
+
+            sneaking:
+                Boolean(
+                    raw.sneaking
+                ),
+
+            sprinting:
+                Boolean(
+                    raw.sprinting
+                ),
+
+            swimming:
+                Boolean(
+                    raw.swimming
+                ),
+
+            flying:
+                Boolean(
+                    raw.flying
+                ),
+
+            dimension:
+                raw.dimension ||
+                null,
+
+            heldItem:
+                raw.heldItem ||
+                raw.item ||
+                null,
+
+            gameMode:
+                raw.gameMode ||
+                null
+        };
+    }
+
+    normalizePosition(
+        position
+    ) {
+
+        if (
+            !position
+        ) {
+
+            return null;
+        }
+
+        const x =
+            Number(
+                position.x
+            );
+
+        const y =
+            Number(
+                position.y
+            );
+
+        const z =
+            Number(
+                position.z
+            );
+
+        if (
+            !Number.isFinite(x) ||
+            !Number.isFinite(y) ||
+            !Number.isFinite(z)
+        ) {
+
+            return null;
+        }
+
+        return {
+
+            x,
+            y,
+            z
+        };
+    }
+
+    normalizeRotation(
+        rotation
+    ) {
+
+        if (
+            !rotation
+        ) {
+            return null;
+        }
+
+        return {
+
+            yaw:
+                Number(
+                    rotation.yaw ??
+                    rotation.x ??
+                    0
+                ),
+
+            pitch:
+                Number(
+                    rotation.pitch ??
+                    rotation.y ??
+                    0
+                )
+        };
+    }
+
+    detectCombat(
+        previous,
+        current
+    ) {
+
+        if (
+            previous.health == null ||
+            current.health == null
+        ) {
+
+            return false;
+        }
+
+        return (
+            current.health <
+            previous.health
+        );
+    }
+
+    lookChanged(
+        previous,
+        current
+    ) {
+
+        if (
+            !previous.rotation ||
+            !current.rotation
+        ) {
+
+            return false;
+        }
+
+        const yawDifference =
+            Math.abs(
+                Number(
+                    previous.rotation.yaw
+                ) -
+                Number(
+                    current.rotation.yaw
+                )
+            );
+
+        const pitchDifference =
+            Math.abs(
+                Number(
+                    previous.rotation.pitch
+                ) -
+                Number(
+                    current.rotation.pitch
+                )
+            );
+
+        return (
+            yawDifference > 8 ||
+            pitchDifference > 8
+        );
+    }
+
+    async watch(
+        name
+    ) {
+
+        if (
+            !name
+        ) {
+
+            return {
+
+                success:
+                    false,
+
+                error:
+                    'Player nomi kerak.'
+            };
+        }
+
+        const player =
+            String(
+                name
+            ).trim();
+
+        this.watchList.add(
+            player
+        );
+
+        context.eventBus.emitSafe(
+            'player:watch_started',
+            {
+                player
+            }
+        );
+
+        return {
+
+            success:
+                true,
+
+            player,
+
+            mode:
+                'normal',
+
+            message:
+                `${player} kuzatuvga olindi.`
+        };
+    }
+
+    async watchHidden(
+        name
+    ) {
+
+        if (
+            !name
+        ) {
+
+            return {
+
+                success:
+                    false,
+
+                error:
+                    'Player nomi kerak.'
+            };
+        }
+
+        const player =
+            String(
+                name
+            ).trim();
+
+        this.watchList.add(
+            player
+        );
+
+        this.hiddenWatch = true;
+
+        context.eventBus.emitSafe(
+            'player:hidden_watch_started',
+            {
+                player
+            }
+        );
+
+        return {
+
+            success:
+                true,
+
+            player,
+
+            mode:
+                'hidden',
+
+            message:
+                `${player} kuzatuv ro‘yxatiga qo‘shildi.`
+        };
+    }
+
+    watchAll() {
+
+        this.globalWatch = true;
+
+        context.eventBus.emitSafe(
+            'player:watch_all',
+            {}
+        );
+
+        return {
+
+            success:
+                true,
+
+            message:
+                'Barcha playerlar kuzatuvi yoqildi.'
+        };
+    }
+
+    unwatch(
+        name
+    ) {
+
+        if (
+            !name
+        ) {
+
+            return {
+
+                success:
+                    false,
+
+                error:
+                    'Player nomi kerak.'
+            };
+        }
+
+        const player =
+            String(
+                name
+            ).trim();
+
+        const removed =
+            this.watchList.delete(
+                player
+            );
+
+        return {
+
+            success:
+                true,
+
+            player,
+
+            removed
+        };
+    }
+
+    unwatchAll() {
+
+        this.watchList.clear();
+
+        this.globalWatch = false;
+
+        this.hiddenWatch = false;
+
+        return {
+
+            success:
+                true,
+
+            message:
+                'Player kuzatuvi to‘xtatildi.'
+        };
+    }
+
+    isWatching(
+        name
+    ) {
+
+        if (
+            this.globalWatch
+        ) {
+
+            return true;
+        }
+
+        return this.watchList.has(
+            String(name)
+        );
+    }
+
+    getPlayer(
+        name
+    ) {
+
+        return (
+            this.players.get(
+                String(name)
+            ) ||
+            null
+        );
+    }
+
+    getOnlinePlayers() {
+
+        return Array.from(
+            this.players.values()
+        )
+            .filter(
+                player =>
+                    player.online
+            );
+    }
+
+    getAllPlayers() {
+
+        return Array.from(
+            this.players.values()
+        );
+    }
+
+    getWatchedPlayers() {
+
+        return Array.from(
+            this.players.values()
+        )
+            .filter(
+                player =>
+                    this.isWatching(
+                        player.name
+                    )
+            );
+    }
+
+    getNearbyPlayers(
+        position,
+        radius = 32
+    ) {
+
+        if (
+            !position
+        ) {
+
+            return this.getOnlinePlayers();
+        }
+
+        return this.getOnlinePlayers()
+            .filter(
+                player => {
+
+                    if (
+                        !player.position
+                    ) {
+                        return false;
+                    }
+
+                    return (
+                        this.distance(
+                            position,
+                            player.position
+                        ) <=
+                        radius
+                    );
+                }
+            );
+    }
+
+    getEvents(
+        limit = 100
+    ) {
+
+        return this.events.slice(
+            -Math.max(
+                1,
+                Number(limit) || 100
+            )
+        );
+    }
+
+    getRecentPlayerEvents(
+        name,
+        limit = 50
+    ) {
+
+        const player =
+            String(
+                name
+            );
+
+        return this.events
+            .filter(
+                event =>
+                    event.player ===
+                    player
+            )
+            .slice(
+                -Math.max(
+                    1,
+                    Number(limit) || 50
+                )
+            );
+    }
+
+    addEvent(
+        event
+    ) {
+
+        const item = {
+
+            id:
+                this.generateId(),
+
+            timestamp:
+                event.timestamp ||
+                Date.now(),
+
+            ...event
+        };
+
+        this.events.push(
+            item
+        );
+
+        if (
+            this.events.length >
+            this.maxEvents
+        ) {
+
+            this.events.splice(
+                0,
+                this.events.length -
+                this.maxEvents
+            );
+        }
+
+        const memory =
+            this.getMemory();
+
+        if (
+            memory &&
+            typeof memory.addEvent ===
+            'function'
+        ) {
+
+            memory.addEvent(
+                item
+            );
+        }
+
+        return item;
+    }
+
+    async rememberPlayer(
+        player
+    ) {
+
+        const memory =
+            this.getMemory();
+
+        if (
+            !memory
+        ) {
+            return;
+        }
+
+        if (
+            typeof memory.updatePlayer ===
+            'function'
+        ) {
+
+            memory.updatePlayer(
+                player.name,
+                player
+            );
+        }
+
+        if (
+            typeof memory.addEvent ===
+            'function'
+        ) {
+
+            memory.addEvent({
+
+                type:
+                    'player_first_seen',
+
+                player:
+                    player.name,
+
+                position:
+                    player.position,
+
+                timestamp:
+                    Date.now()
+            });
+        }
+    }
+
+    getObserver() {
+
+        return (
+            context.get(
+                'world-observer'
+            ) ||
+            context.get(
+                'observer'
+            )
+        );
+    }
+
+    getMemory() {
+
+        return (
+            context.get(
+                'memory'
+            ) ||
+            context.get(
+                'memory-manager'
+            )
+        );
+    }
+
+    distance(
+        a,
+        b
+    ) {
+
+        if (
+            !a ||
+            !b
+        ) {
+
+            return Infinity;
+        }
+
+        const dx =
+            Number(a.x) -
+            Number(b.x);
+
+        const dy =
+            Number(a.y) -
+            Number(b.y);
+
+        const dz =
+            Number(a.z) -
+            Number(b.z);
+
+        return Math.sqrt(
+            dx * dx +
+            dy * dy +
+            dz * dz
+        );
+    }
+
+    toNumberOrNull(
+        value
+    ) {
+
+        if (
+            value === null ||
+            value === undefined
+        ) {
+
+            return null;
+        }
+
+        const number =
+            Number(value);
+
+        return Number.isFinite(
+            number
+        )
+            ? number
+            : null;
+    }
+
+    generateId() {
+
+        return (
+
+            Date.now()
+                .toString(36) +
+
+            '-' +
+
+            Math.random()
+                .toString(36)
+                .slice(2, 10)
+        );
+    }
+
+    status() {
+
+        return {
+
+            running:
+                this.running,
+
+            totalPlayers:
+                this.players.size,
+
+            onlinePlayers:
+                this.getOnlinePlayers().length,
+
+            watchedPlayers:
+                this.watchList.size,
+
+            watchAll:
+                this.globalWatch,
+
+            hiddenWatch:
+                this.hiddenWatch,
+
+            events:
+                this.events.length,
+
+            lastSnapshot:
+                this.lastSnapshot,
+
+            settings:
+                {
+                    ...this.settings
+                }
+        };
+    }
+
+    async execute(
+        action = {}
+    ) {
+
+        const type =
+            String(
+                action.type ||
+                action.action ||
+                action.command ||
+                ''
+            )
+                .toLowerCase()
+                .trim();
+
+        switch (type) {
+
+            case 'watch':
+            case 'kuzat':
+                return this.watch(
+                    action.player ||
+                    action.name
+                );
+
+            case 'watch_hidden':
+            case 'hidden_watch':
+            case 'yashirin_kuzat':
+                return this.watchHidden(
+                    action.player ||
+                    action.name
+                );
+
+            case 'watch_all':
+            case 'all':
+                return this.watchAll();
+
+            case 'unwatch':
+                return this.unwatch(
+                    action.player ||
+                    action.name
+                );
+
+            case 'unwatch_all':
+            case 'stop':
+                return this.unwatchAll();
+
+            case 'status':
+                return this.status();
+
+            case 'players':
+                return this.getOnlinePlayers();
+
+            case 'events':
+                return this.getEvents(
+                    action.limit ||
+                    100
+                );
+
+            default:
+
+                return {
+
+                    success:
+                        false,
+
+                    error:
+                        `Player Tracker noma'lum action: ${type}`
+                };
+        }
+    }
+}
+
+const tracker =
+    new PlayerTracker();
+
+module.exports =
+    tracker;
+
+module.exports.PlayerTracker =
+    PlayerTracker;
