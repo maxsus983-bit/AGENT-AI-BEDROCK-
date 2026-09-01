@@ -4,19 +4,22 @@ require('dotenv').config();
 
 /*
 ===============================================================
- AKV BEDROCK AI AGENT
- CONFIGURATION
+ AKV BEDROCK AI AGENT - CONFIG
 ===============================================================
+ Minecraft Bedrock Server:
 
- Minecraft:
-   Address : Soloraft.aternos.me
-   Port    : 27295
-   Version : 1.26.30
-   Bot     : AKV_AI
+ Address : Soloraft.aternos.me
+ Port    : 27295
+ Version : 1.26.30
 
- DIQQAT:
- OpenRouter API key va Telegram token bu faylga yozilmaydi.
- Ular .env / GitHub Secrets orqali beriladi.
+ Bot:
+ Username : AKV_AI
+
+ MUHIM:
+ Minecraft server manzili ataylab shu faylda
+ to'g'ridan-to'g'ri yozilgan.
+
+ .env dagi MC_HOST va MC_PORT endi ishlatilmaydi.
 ===============================================================
 */
 
@@ -28,69 +31,36 @@ const config = {
 
     minecraft: {
 
-        /*
-        Server manzili.
-        Agar .env da MC_HOST berilsa,
-        .env qiymati ustun bo'ladi.
-        */
+        // BEDROCK SERVER MANZILI
+        host: 'Soloraft.aternos.me',
 
-        host:
-            process.env.MC_HOST ||
-            'Soloraft.aternos.me',
+        // BEDROCK SERVER PORTI
+        port: 27295,
 
-        /*
-        Bedrock server porti.
-        */
+        // BEDROCK VERSION
+        version: '1.26.30',
 
-        port:
-            Number(
-                process.env.MC_PORT ||
-                27295
-            ),
+        // BOT NOMI
+        username: 'AKV_AI',
 
         /*
-        Minecraft Bedrock versiyasi.
+        Offline authentication.
+
+        true:
+          Offline/local server.
+
+        false:
+          Microsoft/Xbox authentication kerak bo'lishi mumkin.
         */
+        offline: true,
 
-        version:
-            process.env.MC_VERSION ||
-            '1.26.30',
+        // Ulanish uzilsa qayta ulanish
+        autoReconnect: true,
 
-        /*
-        Bot username.
-        */
-
-        username:
-            process.env.MC_USERNAME ||
-            'AKV_AI',
-
-        /*
-        Bedrock authentication.
-
-        true  = offline/local authentication
-        false = Microsoft authentication kerak bo'lishi mumkin
-        */
-
-        offline:
-            process.env.MC_OFFLINE !== 'false',
-
-        /*
-        Aloqa uzilsa avtomatik qayta ulanadi.
-        */
-
-        autoReconnect:
-            process.env.MC_AUTO_RECONNECT !== 'false',
-
-        /*
-        Birinchi reconnect kutish vaqti.
-        */
-
-        reconnectDelay:
-            Number(
-                process.env.MC_RECONNECT_DELAY ||
-                10000
-            )
+        // Birinchi reconnect kutish vaqti
+        reconnectDelay: 10000
     },
+
 
     /* =========================================================
        AI
@@ -100,34 +70,20 @@ const config = {
 
         enabled: true,
 
-        /*
-        AI agent mustaqil qaror qabul qilishi mumkin.
-        */
-
         autonomous: true,
-
-        /*
-        OpenRouter modeli.
-        */
 
         model:
             process.env.AI_MODEL ||
             'openrouter/free',
 
-        temperature:
-            0.7,
+        temperature: 0.7,
 
-        maxTokens:
-            4000,
+        maxTokens: 4000,
 
-        /*
-        AI har qaroridan oldin
-        mavjud dunyo holatini tekshiradi.
-        */
-
-        decisionInterval:
-            1500
+        // AI qaror oralig'i
+        decisionInterval: 1500
     },
+
 
     /* =========================================================
        OPENROUTER
@@ -136,7 +92,10 @@ const config = {
     openrouter: {
 
         /*
-        API key .env yoki GitHub Secretdan olinadi.
+        API KEY kodga yozilmaydi.
+
+        GitHub Secret:
+        OPENROUTER_API_KEY
         */
 
         apiKey:
@@ -144,15 +103,13 @@ const config = {
             '',
 
         baseURL:
-            process.env.OPENROUTER_BASE_URL ||
             'https://openrouter.ai/api/v1',
 
-        timeout:
-            60000,
+        timeout: 60000,
 
-        maxRetries:
-            3
+        maxRetries: 3
     },
+
 
     /* =========================================================
        MEMORY
@@ -166,26 +123,13 @@ const config = {
             process.env.MEMORY_DATABASE ||
             './data/memory/akv-memory.db',
 
-        /*
-        Uzoq muddatli xotira.
-        */
-
         permanent: true,
 
-        /*
-        Oxirgi chat xabarlari.
-        */
+        maxRecentMessages: 1000,
 
-        maxRecentMessages:
-            1000,
-
-        /*
-        Kuzatilgan world/entity ma'lumotlari.
-        */
-
-        maxObservations:
-            100000
+        maxObservations: 100000
     },
+
 
     /* =========================================================
        OBSERVER
@@ -195,63 +139,23 @@ const config = {
 
         enabled: true,
 
-        /*
-        Playerlarni kuzatish.
-        */
+        watchPlayers: true,
 
-        watchPlayers:
-            true,
+        watchEntities: true,
 
-        /*
-        Mob va boshqa entitylarni kuzatish.
-        */
+        watchChat: true,
 
-        watchEntities:
-            true,
+        watchBlocks: true,
 
-        /*
-        Chatni kuzatish.
-        */
+        watchCombat: true,
 
-        watchChat:
-            true,
+        watchMovement: true,
 
-        /*
-        Block/world o'zgarishlarini kuzatish.
-        */
+        reportEverything: true,
 
-        watchBlocks:
-            true,
-
-        /*
-        Combat eventlarini kuzatish.
-        */
-
-        watchCombat:
-            true,
-
-        /*
-        Harakatlarni kuzatish.
-        */
-
-        watchMovement:
-            true,
-
-        /*
-        Mavjud kuzatuv ma'lumotlarini imkon qadar
-        to'liq yig'ish.
-        */
-
-        reportEverything:
-            true,
-
-        /*
-        Real-time observer.
-        */
-
-        realtime:
-            true
+        realtime: true
     },
+
 
     /* =========================================================
        COMMANDS
@@ -259,41 +163,17 @@ const config = {
 
     commands: {
 
-        /*
-        Remote commandlar.
-        */
+        remote: true,
 
-        remote:
-            true,
+        telegram: true,
 
-        /*
-        Telegram orqali command.
-        */
+        github: true,
 
-        telegram:
-            true,
+        minecraftChat: true,
 
-        /*
-        GitHub orqali command.
-        */
-
-        github:
-            true,
-
-        /*
-        Minecraft chat orqali command.
-        */
-
-        minecraftChat:
-            true,
-
-        /*
-        Xavfli commandlar uchun tasdiqlash.
-        */
-
-        requireConfirmationForDangerous:
-            true
+        requireConfirmationForDangerous: true
     },
+
 
     /* =========================================================
        TELEGRAM
@@ -315,6 +195,7 @@ const config = {
             ''
     },
 
+
     /* =========================================================
        GITHUB
     ========================================================= */
@@ -334,16 +215,13 @@ const config = {
             process.env.GITHUB_REPOSITORY ||
             '',
 
-        /*
-        GitHub command polling interval.
-        */
-
         pollInterval:
             Number(
                 process.env.GITHUB_POLL_INTERVAL ||
                 10000
             )
     },
+
 
     /* =========================================================
        REPORTS
@@ -353,28 +231,19 @@ const config = {
 
         enabled: true,
 
-        /*
-        AI muhim voqealar haqida xabar beradi.
-        */
+        autonomousReports: true,
 
-        autonomousReports:
-            true,
+        chatReports: true,
 
-        chatReports:
-            true,
+        playerReports: true,
 
-        playerReports:
-            true,
+        combatReports: true,
 
-        combatReports:
-            true,
+        buildReports: true,
 
-        buildReports:
-            true,
-
-        movementReports:
-            true
+        movementReports: true
     },
+
 
     /* =========================================================
        SECURITY
@@ -382,20 +251,11 @@ const config = {
 
     security: {
 
-        /*
-        Tashqi commandlar authenticationdan o'tadi.
-        */
+        requireAuthentication: true,
 
-        requireAuthentication:
-            true,
-
-        /*
-        Noma'lum commandlarni bajarishni taqiqlash.
-        */
-
-        allowUnknownCommands:
-            false
+        allowUnknownCommands: false
     },
+
 
     /* =========================================================
        LOGGING
@@ -412,26 +272,47 @@ const config = {
 
 
 /* =============================================================
-   CONFIG VALIDATION
+   CONFIGURATION CHECK
 ============================================================= */
 
 if (!config.minecraft.host) {
 
     throw new Error(
-        'Minecraft server manzili topilmadi.'
+        'Minecraft server manzili mavjud emas.'
     );
 }
 
 if (
     !Number.isInteger(config.minecraft.port) ||
-    config.minecraft.port <= 0 ||
+    config.minecraft.port < 1 ||
     config.minecraft.port > 65535
 ) {
 
     throw new Error(
-        `Minecraft port noto'g'ri: ${config.minecraft.port}`
+        'Minecraft port noto‘g‘ri: ' +
+        config.minecraft.port
     );
 }
+
+
+/* =============================================================
+   STARTUP INFORMATION
+============================================================= */
+
+console.log(
+    `[CONFIG] Minecraft Server: ` +
+    `${config.minecraft.host}:${config.minecraft.port}`
+);
+
+console.log(
+    `[CONFIG] Bedrock Version: ` +
+    `${config.minecraft.version}`
+);
+
+console.log(
+    `[CONFIG] Bot Username: ` +
+    `${config.minecraft.username}`
+);
 
 
 /* =============================================================
