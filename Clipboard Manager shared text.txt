@@ -1,0 +1,1152 @@
+'use strict';
+
+const EventEmitter = require('events');
+
+const context = require('../core/agent-context');
+const logger = require('../core/logger');
+
+class BedrockAdapter extends EventEmitter {
+
+    constructor() {
+
+        super();
+
+        this.running = false;
+        this.connected = false;
+
+        this.client = null;
+
+        this.host = null;
+        this.port = null;
+
+        this.username = null;
+
+        this.position = {
+            x: 0,
+            y: 0,
+            z: 0
+        };
+
+        this.rotation = {
+            yaw: 0,
+            pitch: 0
+        };
+
+        this.dimension = 'overworld';
+
+        this.health = 20;
+        this.food = 20;
+
+        this.players = new Map();
+        this.entities = new Map();
+
+        this.inventory = [];
+
+        this.lastPacketTime = 0;
+
+        this.statistics = {
+            packetsIn: 0,
+            packetsOut: 0,
+            connects: 0,
+            disconnects: 0,
+            errors: 0
+        };
+    }
+
+    /* =====================================================
+       START
+    ===================================================== */
+
+    async start(options = {}) {
+
+        if (this.running) {
+            return {
+                success: true,
+                alreadyRunning: true
+            };
+        }
+
+        this.running = true;
+
+        this.host =
+            options.host ||
+            process.env.MC_HOST ||
+            null;
+
+        this.port =
+            Number(
+                options.port ||
+                process.env.MC_PORT ||
+                19132
+            );
+
+        this.username =
+            options.username ||
+            process.env.MC_USERNAME ||
+            'AKV_AI';
+
+        logger.info(
+            `Bedrock adapter tayyor: ${this.host}:${this.port}`
+        );
+
+        context.eventBus.emitSafe(
+            'bedrock:starting',
+            {
+                host: this.host,
+                port: this.port,
+                username: this.username
+            }
+        );
+
+        /*
+        Real protocol/client implementatsiyasi
+        shu metod orqali ulanadi.
+
+        Adapter ataylab transport qatlamidan
+        ajratilgan. Shuning uchun qolgan AI
+        modullari qaysi Bedrock packet library
+        ishlatilayotganini bilmaydi.
+        */
+
+        try {
+
+            await this.connect();
+
+            return {
+                success: true,
+                connected: this.connected
+            };
+
+        } catch (error) {
+
+            this.statistics.errors++;
+
+            logger.error(
+                `Bedrock ulanish xatosi: ${error.message}`
+            );
+
+            this.running = false;
+
+            return {
+                success: false,
+                error: error.message
+            };
+        }
+    }
+
+    /* =====================================================
+       CONNECT
+    ===================================================== */
+
+    async connect() {
+
+        if (
+            !this.host
+        ) {
+
+            throw new Error(
+                'MC_HOST berilmagan.'
+            );
+        }
+
+        /*
+        Transport connector keyinchalik
+        shu joyga inject qilinadi.
+        */
+
+        const connector =
+            context.get(
+                'bedrock-connector'
+            );
+
+        if (
+            connector &&
+            typeof connector.connect ===
+                'function'
+        ) {
+
+            this.client =
+                await connector.connect({
+
+                    host:
+                        this.host,
+
+                    port:
+                        this.port,
+
+                    username:
+                        this.username
+                });
+
+            this.connected = true;
+
+            this.statistics.connects++;
+
+            this.attachClientEvents();
+
+            context.eventBus.emitSafe(
+                'minecraft:connected',
+                {
+                    host: this.host,
+                    port: this.port
+                }
+            );
+
+            logger.success(
+                'Minecraft Bedrock serverga ulandi.'
+            );
+
+            return true;
+        }
+
+        /*
+        Connector topilmasa, ulanishni
+        muvaffaqiyatsiz deb bildiradi.
+        Soxta "connected" holat yaratmaymiz.
+        */
+
+        throw new Error(
+            'Bedrock connector topilmadi.'
+        );
+    }
+
+    /* =====================================================
+       CLIENT EVENTS
+    ===================================================== */
+
+    attachClientEvents() {
+
+        if (
+            !this.client ||
+            typeof this.client.on !==
+                'function'
+        ) {
+
+            return;
+        }
+
+        this.client.on(
+            'packet',
+            packet =>
+                this.handlePacket(
+                    packet
+                )
+        );
+
+        this.client.on(
+            'disconnect',
+            reason =>
+                this.handleDisconnect(
+                    reason
+                )
+        );
+
+        this.client.on(
+            'error',
+            error =>
+                this.handleError(
+                    error
+                )
+        );
+
+        this.client.on(
+            'close',
+            () =>
+                this.handleDisconnect(
+                    'connection closed'
+                )
+        );
+    }
+
+    /* =====================================================
+       PACKET
+    ===================================================== */
+
+    handlePacket(packet) {
+
+        this.statistics.packetsIn++;
+
+        this.lastPacketTime =
+            Date.now();
+
+        if (!packet) {
+            return;
+        }
+
+        const name =
+            packet.name ||
+            packet.packet_name ||
+            packet.type ||
+            'unknown';
+
+        context.eventBus.emitSafe(
+            `bedrock:packet:${name}`,
+            packet
+        );
+
+        context.eventBus.emitSafe(
+            'bedrock:packet',
+            {
+                name,
+                packet
+            }
+        );
+
+        this.updateStateFromPacket(
+            name,
+            packet
+        );
+    }
+
+    /* =====================================================
+       STATE
+    ===================================================== */
+
+    updateStateFromPacket(
+        name,
+        packet
+    ) {
+
+        /*
+        Turli protocol librarylarda packet
+        field nomlari farq qilishi mumkin.
+        Shuning uchun bir nechta format
+        qo‘llab-quvvatlanadi.
+        */
+
+        const position =
+            packet.position ||
+            packet.player_position ||
+            packet.pos;
+
+        if (
+            position
+        ) {
+
+            this.setPosition(
+                position.x,
+                position.y,
+                position.z
+            );
+        }
+
+        if (
+            packet.yaw !== undefined
+        ) {
+
+            this.rotation.yaw =
+                Number(packet.yaw);
+        }
+
+        if (
+            packet.pitch !== undefined
+        ) {
+
+            this.rotation.pitch =
+                Number(packet.pitch);
+        }
+
+        if (
+            packet.health !== undefined
+        ) {
+
+            this.health =
+                Number(packet.health);
+        }
+
+        if (
+            packet.food !== undefined
+        ) {
+
+            this.food =
+                Number(packet.food);
+        }
+
+        if (
+            packet.dimension
+        ) {
+
+            this.dimension =
+                String(
+                    packet.dimension
+                );
+        }
+
+        context.state.position = {
+            ...this.position
+        };
+
+        context.state.rotation = {
+            ...this.rotation
+        };
+
+        context.state.dimension =
+            this.dimension;
+
+        context.state.health =
+            this.health;
+
+        context.state.food =
+            this.food;
+    }
+
+    /* =====================================================
+       POSITION
+    ===================================================== */
+
+    setPosition(
+        x,
+        y,
+        z
+    ) {
+
+        this.position = {
+
+            x:
+                Number(x) || 0,
+
+            y:
+                Number(y) || 0,
+
+            z:
+                Number(z) || 0
+        };
+
+        context.state.position = {
+            ...this.position
+        };
+
+        context.eventBus.emitSafe(
+            'minecraft:position',
+            {
+                ...this.position
+            }
+        );
+    }
+
+    getPosition() {
+
+        return {
+            ...this.position
+        };
+    }
+
+    getRotation() {
+
+        return {
+            ...this.rotation
+        };
+    }
+
+    /* =====================================================
+       MOVEMENT
+    ===================================================== */
+
+    async moveDirection(
+        direction,
+        duration = 1000,
+        speed = 1
+    ) {
+
+        this.ensureConnected();
+
+        const normalized =
+            String(
+                direction
+            )
+                .toLowerCase();
+
+        const end =
+            Date.now() +
+            Number(duration);
+
+        while (
+            Date.now() <
+            end
+        ) {
+
+            if (!this.connected) {
+
+                throw new Error(
+                    'Minecraft ulanishi uzilgan.'
+                );
+            }
+
+            await this.sendMovement({
+
+                direction:
+                    normalized,
+
+                speed:
+                    Number(speed) || 1,
+
+                position:
+                    this.getPosition(),
+
+                rotation:
+                    this.getRotation()
+            });
+
+            await this.sleep(
+                50
+            );
+        }
+
+        return {
+            success: true
+        };
+    }
+
+    async moveTo(
+        position
+    ) {
+
+        this.ensureConnected();
+
+        if (
+            !position
+        ) {
+
+            return {
+                success: false,
+                error:
+                    'Position berilmagan.'
+            };
+        }
+
+        const current =
+            this.getPosition();
+
+        const dx =
+            Number(position.x) -
+            current.x;
+
+        const dy =
+            Number(position.y) -
+            current.y;
+
+        const dz =
+            Number(position.z) -
+            current.z;
+
+        const horizontal =
+            Math.sqrt(
+                dx * dx +
+                dz * dz
+            );
+
+        if (
+            horizontal >
+            0.01
+        ) {
+
+            const yaw =
+                Math.atan2(
+                    -dx,
+                    dz
+                ) *
+                180 /
+                Math.PI;
+
+            await this.look(
+                yaw,
+                0
+            );
+        }
+
+        /*
+        Harakat packetini transportga yuborish.
+        */
+
+        await this.sendMovement({
+
+            direction:
+                'target',
+
+            target:
+                {
+                    x:
+                        Number(position.x),
+
+                    y:
+                        Number(position.y),
+
+                    z:
+                        Number(position.z)
+                },
+
+            delta:
+                {
+                    x: dx,
+                    y: dy,
+                    z: dz
+                }
+        });
+
+        return {
+            success: true,
+            target: position
+        };
+    }
+
+    async goto(
+        position
+    ) {
+
+        return this.moveTo(
+            position
+        );
+    }
+
+    async follow(
+        playerName,
+        options = {}
+    ) {
+
+        const observer =
+            context.get(
+                'world-observer'
+            ) ||
+            context.get(
+                'observer'
+            );
+
+        if (
+            !observer
+        ) {
+
+            return {
+                success: false,
+                error:
+                    'World Observer topilmadi.'
+            };
+        }
+
+        while (
+            true
+        ) {
+
+            if (
+                typeof options.stopSignal ===
+                    'function' &&
+                options.stopSignal()
+            ) {
+
+                break;
+            }
+
+            const player =
+                typeof observer.getPlayer ===
+                    'function'
+                    ? observer.getPlayer(
+                        playerName
+                    )
+                    : null;
+
+            if (
+                !player
+            ) {
+
+                await this.sleep(
+                    500
+                );
+
+                continue;
+            }
+
+            const position =
+                player.position ||
+                player.pos;
+
+            if (
+                position
+            ) {
+
+                await this.moveTo(
+                    position
+                );
+            }
+
+            await this.sleep(
+                250
+            );
+        }
+
+        return {
+            success: true,
+            stopped: true
+        };
+    }
+
+    async stop() {
+
+        if (
+            !this.connected
+        ) {
+
+            return {
+                success: true
+            };
+        }
+
+        await this.sendMovement({
+
+            direction:
+                'stop',
+
+            position:
+                this.getPosition()
+        });
+
+        return {
+            success: true
+        };
+    }
+
+    /* =====================================================
+       LOOK
+    ===================================================== */
+
+    async look(
+        yaw,
+        pitch = 0
+    ) {
+
+        this.ensureConnected();
+
+        this.rotation = {
+
+            yaw:
+                Number(yaw) || 0,
+
+            pitch:
+                Number(pitch) || 0
+        };
+
+        context.state.rotation = {
+            ...this.rotation
+        };
+
+        await this.sendPacket(
+            'look',
+            {
+                yaw:
+                    this.rotation.yaw,
+
+                pitch:
+                    this.rotation.pitch
+            }
+        );
+
+        return {
+            success: true
+        };
+    }
+
+    /* =====================================================
+       CHAT
+    ===================================================== */
+
+    async chat(
+        message
+    ) {
+
+        this.ensureConnected();
+
+        const text =
+            String(
+                message || ''
+            ).trim();
+
+        if (!text) {
+
+            return {
+                success: false,
+                error:
+                    'Chat xabari bo‘sh.'
+            };
+        }
+
+        await this.sendPacket(
+            'chat',
+            {
+                message:
+                    text
+            }
+        );
+
+        context.eventBus.emitSafe(
+            'minecraft:chat_sent',
+            {
+                message:
+                    text
+            }
+        );
+
+        return {
+            success: true,
+            message: text
+        };
+    }
+
+    /* =====================================================
+       BLOCK
+    ===================================================== */
+
+    async breakBlock(
+        position
+    ) {
+
+        this.ensureConnected();
+
+        return this.sendPacket(
+            'break_block',
+            {
+                position
+            }
+        );
+    }
+
+    async placeBlock(
+        position,
+        block
+    ) {
+
+        this.ensureConnected();
+
+        return this.sendPacket(
+            'place_block',
+            {
+                position,
+                block
+            }
+        );
+    }
+
+    /* =====================================================
+       INVENTORY
+    ===================================================== */
+
+    async selectSlot(
+        slot
+    ) {
+
+        this.ensureConnected();
+
+        return this.sendPacket(
+            'select_slot',
+            {
+                slot:
+                    Number(slot)
+            }
+        );
+    }
+
+    async useItem() {
+
+        this.ensureConnected();
+
+        return this.sendPacket(
+            'use_item',
+            {}
+        );
+    }
+
+    /* =====================================================
+       ATTACK
+    ===================================================== */
+
+    async attack(
+        entityId
+    ) {
+
+        this.ensureConnected();
+
+        return this.sendPacket(
+            'attack',
+            {
+                entityId
+            }
+        );
+    }
+
+    /* =====================================================
+       GENERIC PACKET
+    ===================================================== */
+
+    async sendPacket(
+        name,
+        data
+    ) {
+
+        this.ensureConnected();
+
+        this.statistics.packetsOut++;
+
+        if (
+            this.client &&
+            typeof this.client.sendPacket ===
+                'function'
+        ) {
+
+            return this.client.sendPacket(
+                name,
+                data
+            );
+        }
+
+        if (
+            this.client &&
+            typeof this.client.write ===
+                'function'
+        ) {
+
+            return this.client.write(
+                name,
+                data
+            );
+        }
+
+        const transport =
+            context.get(
+                'bedrock-transport'
+            );
+
+        if (
+            transport &&
+            typeof transport.send ===
+                'function'
+        ) {
+
+            return transport.send(
+                name,
+                data
+            );
+        }
+
+        throw new Error(
+            `Packet transport mavjud emas: ${name}`
+        );
+    }
+
+    async sendMovement(
+        movement
+    ) {
+
+        return this.sendPacket(
+            'move',
+            movement
+        );
+    }
+
+    /* =====================================================
+       DISCONNECT
+    ===================================================== */
+
+    handleDisconnect(
+        reason
+    ) {
+
+        this.connected = false;
+
+        this.statistics.disconnects++;
+
+        context.eventBus.emitSafe(
+            'minecraft:disconnected',
+            {
+                reason
+            }
+        );
+
+        logger.warn(
+            `Minecraft uzildi: ${reason || 'unknown'}`
+        );
+    }
+
+    handleError(
+        error
+    ) {
+
+        this.statistics.errors++;
+
+        logger.error(
+            `Bedrock error: ${error?.message || error}`
+        );
+
+        context.eventBus.emitSafe(
+            'minecraft:error',
+            {
+                error
+            }
+        );
+    }
+
+    /* =====================================================
+       STATE ACCESS
+    ===================================================== */
+
+    getHealth() {
+
+        return this.health;
+    }
+
+    getFood() {
+
+        return this.food;
+    }
+
+    getDimension() {
+
+        return this.dimension;
+    }
+
+    getPlayers() {
+
+        return Array.from(
+            this.players.values()
+        );
+    }
+
+    getEntities() {
+
+        return Array.from(
+            this.entities.values()
+        );
+    }
+
+    getInventory() {
+
+        return [
+            ...this.inventory
+        ];
+    }
+
+    /* =====================================================
+       STATUS
+    ===================================================== */
+
+    status() {
+
+        return {
+
+            running:
+                this.running,
+
+            connected:
+                this.connected,
+
+            host:
+                this.host,
+
+            port:
+                this.port,
+
+            username:
+                this.username,
+
+            position:
+                this.getPosition(),
+
+            rotation:
+                this.getRotation(),
+
+            dimension:
+                this.dimension,
+
+            health:
+                this.health,
+
+            food:
+                this.food,
+
+            players:
+                this.players.size,
+
+            entities:
+                this.entities.size,
+
+            statistics:
+                {
+                    ...this.statistics
+                }
+        };
+    }
+
+    /* =====================================================
+       VALIDATION
+    ===================================================== */
+
+    ensureConnected() {
+
+        if (
+            !this.connected
+        ) {
+
+            throw new Error(
+                'Minecraft bot serverga ulanmagan.'
+            );
+        }
+    }
+
+    /* =====================================================
+       STOP
+    ===================================================== */
+
+    async stop() {
+
+        this.running = false;
+
+        if (
+            this.client &&
+            typeof this.client.disconnect ===
+                'function'
+        ) {
+
+            try {
+
+                await this.client.disconnect();
+
+            } catch (_) {}
+        }
+
+        this.client = null;
+
+        this.connected = false;
+
+        context.eventBus.emitSafe(
+            'minecraft:disconnected',
+            {
+                reason:
+                    'adapter stopped'
+            }
+        );
+
+        logger.info(
+            'Bedrock Adapter to‘xtatildi.'
+        );
+
+        return {
+            success: true
+        };
+    }
+
+    sleep(ms) {
+
+        return new Promise(
+            resolve =>
+                setTimeout(
+                    resolve,
+                    ms
+                )
+        );
+    }
+}
+
+const adapter =
+    new BedrockAdapter();
+
+module.exports =
+    adapter;
+
+module.exports.BedrockAdapter =
+    BedrockAdapter;
