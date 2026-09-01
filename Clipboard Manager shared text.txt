@@ -1,0 +1,987 @@
+'use strict';
+
+const logger = require('../core/logger');
+
+class CommandParser {
+
+    constructor() {
+
+        this.running = false;
+
+        this.rules = [];
+
+        this.registerDefaultRules();
+    }
+
+    start() {
+
+        if (this.running) {
+            return;
+        }
+
+        this.running = true;
+
+        logger.info(
+            'Command Parser ishga tushdi.'
+        );
+    }
+
+    stop() {
+
+        this.running = false;
+    }
+
+    parse(input, metadata = {}) {
+
+        if (
+            input === null ||
+            input === undefined
+        ) {
+
+            return this.unknown('');
+        }
+
+        const original =
+            String(input).trim();
+
+        if (!original) {
+            return this.unknown('');
+        }
+
+        const text =
+            this.normalize(original);
+
+        for (
+            const rule of this.rules
+        ) {
+
+            const match =
+                text.match(rule.pattern);
+
+            if (!match) {
+                continue;
+            }
+
+            try {
+
+                const result =
+                    rule.handler(
+                        match,
+                        original,
+                        text,
+                        metadata
+                    );
+
+                if (result) {
+
+                    return {
+
+                        success: true,
+
+                        source:
+                            original,
+
+                        normalized:
+                            text,
+
+                        ...result
+                    };
+                }
+
+            } catch (error) {
+
+                logger.error(
+                    `Command parser xatosi: ${error.message}`
+                );
+            }
+        }
+
+        return this.unknown(
+            original
+        );
+    }
+
+    register(
+        name,
+        pattern,
+        handler,
+        priority = 0
+    ) {
+
+        this.rules.push({
+
+            name,
+            pattern,
+            handler,
+            priority
+        });
+
+        this.rules.sort(
+            (a, b) =>
+                b.priority -
+                a.priority
+        );
+    }
+
+    registerDefaultRules() {
+
+        /*
+        =========================================================
+        STOP
+        =========================================================
+        */
+
+        this.register(
+            'stop',
+            /^(toxta|to'xta|bekor qil|toxtat|harakatni toxtat|hammasini toxtat)$/i,
+            () => ({
+
+                action:
+                    'stop',
+
+                confidence:
+                    1,
+
+                parameters: {}
+            }),
+            100
+        );
+
+        /*
+        =========================================================
+        AUTO / AUTONOMOUS
+        =========================================================
+        */
+
+        this.register(
+            'autonomous',
+            /^(ozing|o'zing|mustaqil|avtomatik|avto).*(harakat qil|harakatlan|ishla|oyinla|o'yinla|qaror qil).*$/i,
+            () => ({
+
+                action:
+                    'autonomous',
+
+                confidence:
+                    0.98,
+
+                parameters: {
+
+                    enabled:
+                        true
+                }
+            }),
+            95
+        );
+
+        this.register(
+            'autonomous',
+            /^(ozing|o'zing|mustaqil).*(hammasini qil|hammasini bajar|boshqar).*$/i,
+            () => ({
+
+                action:
+                    'autonomous',
+
+                confidence:
+                    0.98,
+
+                parameters: {
+
+                    enabled:
+                        true
+                }
+            }),
+            95
+        );
+
+        /*
+        =========================================================
+        MOVEMENT
+        =========================================================
+        */
+
+        this.register(
+            'move_forward',
+            /^(oldinga|oldin|to'g'ri|togri).*(yur|bor|yurib bor|harakat qil).*$/i,
+            () => ({
+
+                action:
+                    'move',
+
+                confidence:
+                    0.98,
+
+                parameters: {
+
+                    direction:
+                        'forward'
+                }
+            }),
+            90
+        );
+
+        this.register(
+            'move_backward',
+            /^(orqaga|orqaga qarab).*(yur|bor|qayt).*$/i,
+            () => ({
+
+                action:
+                    'move',
+
+                confidence:
+                    0.98,
+
+                parameters: {
+
+                    direction:
+                        'backward'
+                }
+            }),
+            90
+        );
+
+        this.register(
+            'move_left',
+            /^(chapga|chap tomonga).*(yur|bor|harakat qil).*$/i,
+            () => ({
+
+                action:
+                    'move',
+
+                confidence:
+                    0.98,
+
+                parameters: {
+
+                    direction:
+                        'left'
+                }
+            }),
+            90
+        );
+
+        this.register(
+            'move_right',
+            /^(ongga|o'ngga|o'ng tomonga).*(yur|bor|harakat qil).*$/i,
+            () => ({
+
+                action:
+                    'move',
+
+                confidence:
+                    0.98,
+
+                parameters: {
+
+                    direction:
+                        'right'
+                }
+            }),
+            90
+        );
+
+        this.register(
+            'jump',
+            /^(sakra|sakrash|sakrab ol).*$/i,
+            () => ({
+
+                action:
+                    'move',
+
+                confidence:
+                    1,
+
+                parameters: {
+
+                    movement:
+                        'jump'
+                }
+            }),
+            90
+        );
+
+        this.register(
+            'sprint',
+            /^(yugur|tez yur|tezroq bor|yugurib bor).*$/i,
+            () => ({
+
+                action:
+                    'move',
+
+                confidence:
+                    0.98,
+
+                parameters: {
+
+                    movement:
+                        'sprint'
+                }
+            }),
+            90
+        );
+
+        /*
+        =========================================================
+        GO TO LOCATION
+        =========================================================
+        */
+
+        this.register(
+            'go_to_coordinates',
+            /(?:shu joyga|joyga|koordinataga|koordinatalarga|nuqtaga).*(?:bor|yur|yetib bor).*?(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)/i,
+            match => ({
+
+                action:
+                    'move',
+
+                confidence:
+                    0.99,
+
+                parameters: {
+
+                    target:
+                        'coordinates',
+
+                    x:
+                        Number(match[1]),
+
+                    y:
+                        Number(match[2]),
+
+                    z:
+                        Number(match[3])
+                }
+            }),
+            100
+        );
+
+        this.register(
+            'go_to_player',
+            /(?:player|oyinchi|o'yinchi)\s+([A-Za-z0-9_]+).*(?:oldiga|yoniga|orqasidan).*(?:bor|yur|yetib bor)/i,
+            match => ({
+
+                action:
+                    'move',
+
+                confidence:
+                    0.97,
+
+                parameters: {
+
+                    target:
+                        'player',
+
+                    player:
+                        match[1]
+                }
+            }),
+            95
+        );
+
+        /*
+        =========================================================
+        WATCH PLAYER
+        =========================================================
+        */
+
+        this.register(
+            'watch_player',
+            /^(?:([A-Za-z0-9_]+)\s+)?(?:ni\s*)?(kuzat|kuzatib tur|kuzatuvga ol).*$/i,
+            match => {
+
+                const player =
+                    match[1] ||
+                    this.extractPlayerName(
+                        match[0]
+                    );
+
+                return {
+
+                    action:
+                        'watch',
+
+                    confidence:
+                        0.94,
+
+                    parameters: {
+
+                        player:
+                            player
+                    }
+                };
+            },
+            90
+        );
+
+        this.register(
+            'watch_hidden',
+            /(?:yashirin|sezdirmay|maxfiy).*(?:kuzat|kuzatib tur).*?([A-Za-z0-9_]+)/i,
+            match => ({
+
+                action:
+                    'watch_hidden',
+
+                confidence:
+                    0.95,
+
+                parameters: {
+
+                    player:
+                        match[1]
+                }
+            }),
+            100
+        );
+
+        this.register(
+            'watch_all',
+            /(?:hamma|barcha|barcha player|hamma player).*(?:kuzat|kuzatib tur|kuzatuvga ol)/i,
+            () => ({
+
+                action:
+                    'watch_all',
+
+                confidence:
+                    0.99,
+
+                parameters: {}
+            }),
+            95
+        );
+
+        /*
+        =========================================================
+        COMBAT
+        =========================================================
+        */
+
+        this.register(
+            'fight',
+            /^(?:jang qil|ur|hujum qil|urush|jangga kir).*$/i,
+            () => ({
+
+                action:
+                    'fight',
+
+                confidence:
+                    0.98,
+
+                parameters: {}
+            }),
+            95
+        );
+
+        this.register(
+            'fight_target',
+            /^(?:([A-Za-z0-9_]+)\s+)?(?:ga\s+)?(?:jang qil|hujum qil|ur|urush).*$/i,
+            match => ({
+
+                action:
+                    'fight',
+
+                confidence:
+                    0.97,
+
+                parameters: {
+
+                    target:
+                        match[1] ||
+                        null
+                }
+            }),
+            90
+        );
+
+        this.register(
+            'auto_fight',
+            /^(?:avto|avtomatik|o'zing).*(?:jang qil|jangla|urush|hujum qil).*$/i,
+            () => ({
+
+                action:
+                    'auto_fight',
+
+                confidence:
+                    0.98,
+
+                parameters: {
+
+                    enabled:
+                        true
+                }
+            }),
+            95
+        );
+
+        /*
+        =========================================================
+        BUILD
+        =========================================================
+        */
+
+        this.register(
+            'build',
+            /^(?:qur|qurib ber|qurishni boshlagin|bino qur).*$/i,
+            match => ({
+
+                action:
+                    'build',
+
+                confidence:
+                    0.92,
+
+                parameters: {
+
+                    instruction:
+                        match[0]
+                }
+            }),
+            80
+        );
+
+        this.register(
+            'build_specific',
+            /(?:shu yerga|shu joyga|bu yerga|bu joyga).*(?:qur|qo'y|qoy|joylashtir|bino qil).*$/i,
+            match => ({
+
+                action:
+                    'build',
+
+                confidence:
+                    0.96,
+
+                parameters: {
+
+                    instruction:
+                        match[0],
+
+                    location:
+                        'current'
+                }
+            }),
+            90
+        );
+
+        this.register(
+            'place_block',
+            /(?:block|blok).*(?:qo'y|qoy|joylashtir).*$/i,
+            match => ({
+
+                action:
+                    'build',
+
+                confidence:
+                    0.95,
+
+                parameters: {
+
+                    mode:
+                        'place_block',
+
+                    instruction:
+                        match[0]
+                }
+            }),
+            90
+        );
+
+        /*
+        =========================================================
+        CHAT
+        =========================================================
+        */
+
+        this.register(
+            'chat',
+            /^(?:chatga|chatda|server chatiga|chat orqali)\s+(.+)$/i,
+            match => ({
+
+                action:
+                    'chat',
+
+                confidence:
+                    0.99,
+
+                parameters: {
+
+                    message:
+                        match[1]
+                }
+            }),
+            100
+        );
+
+        this.register(
+            'say',
+            /^(?:yoz|ayt|xabar ber|chatga yoz)\s+(.+)$/i,
+            match => ({
+
+                action:
+                    'chat',
+
+                confidence:
+                    0.98,
+
+                parameters: {
+
+                    message:
+                        match[1]
+                }
+            }),
+            95
+        );
+
+        /*
+        =========================================================
+        OBSERVATION / REPORT
+        =========================================================
+        */
+
+        this.register(
+            'report',
+            /^(?:nima bo'lyapti|nima bolyapti|holatni ayt|hisobot ber|report ber|nima bo'ldi).*$/i,
+            () => ({
+
+                action:
+                    'report',
+
+                confidence:
+                    0.99,
+
+                parameters: {}
+            }),
+            95
+        );
+
+        this.register(
+            'scan',
+            /^(?:atrofni tekshir|atrofni kuzat|atrofni skaner qil|nima borligini tekshir).*$/i,
+            () => ({
+
+                action:
+                    'scan',
+
+                confidence:
+                    0.98,
+
+                parameters: {}
+            }),
+            95
+        );
+
+        /*
+        =========================================================
+        MEMORY
+        =========================================================
+        */
+
+        this.register(
+            'remember',
+            /^(?:eslab qol|xotiraga saqla|buni eslab qol)\s+(.+)$/i,
+            match => ({
+
+                action:
+                    'remember',
+
+                confidence:
+                    1,
+
+                parameters: {
+
+                    text:
+                        match[1]
+                }
+            }),
+            100
+        );
+
+        this.register(
+            'recall',
+            /^(?:eslat|esla|nima degandim|nima deganimni ayt)\s*(.*)$/i,
+            match => ({
+
+                action:
+                    'recall',
+
+                confidence:
+                    0.98,
+
+                parameters: {
+
+                    query:
+                        match[1] ||
+                        ''
+                }
+            }),
+            100
+        );
+
+        /*
+        =========================================================
+        STATUS
+        =========================================================
+        */
+
+        this.register(
+            'status',
+            /^(?:holating qanday|holat|status|bot holati|nima qilyapsan).*$/i,
+            () => ({
+
+                action:
+                    'status',
+
+                confidence:
+                    1,
+
+                parameters: {}
+            }),
+            100
+        );
+
+        /*
+        =========================================================
+        FOLLOW
+        =========================================================
+        */
+
+        this.register(
+            'follow',
+            /^(?:([A-Za-z0-9_]+)\s+)?(?:ni\s*)?(ergash|ortidan bor|kuzatib bor).*$/i,
+            match => ({
+
+                action:
+                    'follow',
+
+                confidence:
+                    0.96,
+
+                parameters: {
+
+                    player:
+                        match[1] ||
+                        null
+                }
+            }),
+            90
+        );
+
+        /*
+        =========================================================
+        STOP WATCH
+        =========================================================
+        */
+
+        this.register(
+            'unwatch',
+            /^(?:kuzatishni to'xtat|kuzatishni toxta|kuzatishni bekor qil).*$/i,
+            () => ({
+
+                action:
+                    'unwatch_all',
+
+                confidence:
+                    1,
+
+                parameters: {}
+            }),
+            100
+        );
+    }
+
+    extractPlayerName(
+        text
+    ) {
+
+        const clean =
+            String(text)
+                .replace(
+                    /kuzat|kuzatib tur|kuzatuvga ol/gi,
+                    ''
+                )
+                .replace(
+                    /\bni\b/gi,
+                    ''
+                )
+                .trim();
+
+        const match =
+            clean.match(
+                /([A-Za-z0-9_]+)/
+            );
+
+        return match
+            ? match[1]
+            : null;
+    }
+
+    normalize(
+        text
+    ) {
+
+        return String(text)
+            .toLowerCase()
+            .trim()
+            .replace(
+                /[ʻʼ’‘]/g,
+                "'"
+            )
+            .replace(
+                /\s+/g,
+                ' '
+            );
+    }
+
+    unknown(
+        input
+    ) {
+
+        return {
+
+            success:
+                false,
+
+            recognized:
+                false,
+
+            action:
+                'unknown',
+
+            confidence:
+                0,
+
+            source:
+                input,
+
+            parameters: {},
+
+            requiresAI:
+                true
+        };
+    }
+
+    explain(
+        parsed
+    ) {
+
+        if (
+            !parsed ||
+            !parsed.success
+        ) {
+
+            return 'Buyruqni tushunish uchun AI tahlili kerak.';
+        }
+
+        const action =
+            parsed.action;
+
+        const params =
+            parsed.parameters || {};
+
+        switch (action) {
+
+            case 'move':
+
+                if (
+                    params.target ===
+                    'player'
+                ) {
+
+                    return `Player ${params.player} oldiga borish.`;
+                }
+
+                if (
+                    params.target ===
+                    'coordinates'
+                ) {
+
+                    return `(${params.x}, ${params.y}, ${params.z}) koordinatasiga borish.`;
+                }
+
+                return 'Harakat qilish.';
+
+            case 'fight':
+
+                return params.target
+                    ? `${params.target} bilan jang qilish.`
+                    : 'Jang qilish.';
+
+            case 'watch':
+
+                return `Player ${params.player || 'aniqlanmagan'}ni kuzatish.`;
+
+            case 'watch_hidden':
+
+                return `Player ${params.player || 'aniqlanmagan'}ni kuzatish rejimiga olish.`;
+
+            case 'build':
+
+                return 'Qurilish vazifasini bajarish.';
+
+            case 'chat':
+
+                return `Server chatiga: "${params.message}"`;
+
+            case 'autonomous':
+
+                return 'Mustaqil AI rejimini yoqish.';
+
+            case 'report':
+
+                return 'Dunyodagi joriy holat haqida hisobot tayyorlash.';
+
+            case 'scan':
+
+                return 'Atrofni tekshirish.';
+
+            case 'remember':
+
+                return 'Ma’lumotni xotiraga saqlash.';
+
+            case 'recall':
+
+                return 'Xotiradan ma’lumot qidirish.';
+
+            default:
+
+                return action;
+        }
+    }
+
+    listRules() {
+
+        return this.rules.map(
+            rule => ({
+
+                name:
+                    rule.name,
+
+                priority:
+                    rule.priority,
+
+                pattern:
+                    String(
+                        rule.pattern
+                    )
+            })
+        );
+    }
+
+    status() {
+
+        return {
+
+            running:
+                this.running,
+
+            rules:
+                this.rules.length
+        };
+    }
+}
+
+const parser =
+    new CommandParser();
+
+module.exports =
+    parser;
+
+module.exports.CommandParser =
+    CommandParser;
