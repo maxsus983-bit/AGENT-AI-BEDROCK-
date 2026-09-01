@@ -13,10 +13,10 @@ jobs:
       - name: Repository yuklash
         uses: actions/checkout@v4
 
-      - name: Node.js o‘rnatish
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+  - name: Node.js o‘rnatish
+  uses: actions/setup-node@v4
+  with:
+    node-version: 24
           cache: npm
 
       - name: Dependencies o‘rnatish
