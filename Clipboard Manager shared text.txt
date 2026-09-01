@@ -1,0 +1,1073 @@
+'use strict';
+
+const context = require('../core/agent-context');
+const logger = require('../core/logger');
+
+class BuildEngine {
+
+    constructor() {
+        this.running = false;
+        this.busy = false;
+
+        this.currentTask = null;
+
+        this.cancelRequested = false;
+
+        this.tasks = [];
+        this.history = [];
+
+        this.maxHistory = 2000;
+        this.maxTasks = 1000;
+
+        this.settings = {
+            placeDelay: 120,
+            breakDelay: 180,
+            maxBuildDistance: 6,
+            safetyCheck: true,
+            verifyBlocks: true
+        };
+    }
+
+    start() {
+
+        if (this.running) {
+            return;
+        }
+
+        this.running = true;
+
+        logger.info(
+            'Build Engine ishga tushdi.'
+        );
+
+        context.eventBus.emitSafe(
+            'build:started',
+            {}
+        );
+    }
+
+    async execute(action = {}) {
+
+        this.start();
+
+        const type =
+            String(
+                action.type ||
+                action.action ||
+                action.command ||
+                ''
+            )
+                .toLowerCase()
+                .trim();
+
+        if (
+            type === 'cancel' ||
+            type === 'stop' ||
+            type === 'toxtat'
+        ) {
+            return this.cancel();
+        }
+
+        if (
+            type === 'place' ||
+            type === 'put' ||
+            type === 'qoy'
+        ) {
+            return this.placeBlock(
+                action.position ||
+                action.pos,
+                action.block ||
+                action.blockName
+            );
+        }
+
+        if (
+            type === 'break' ||
+            type === 'destroy' ||
+            type === 'buz'
+        ) {
+            return this.breakBlock(
+                action.position ||
+                action.pos
+            );
+        }
+
+        if (
+            type === 'build' ||
+            type === 'construct' ||
+            type === 'qur'
+        ) {
+            return this.build(
+                action.plan ||
+                action.structure ||
+                action.blocks
+            );
+        }
+
+        return {
+            success: false,
+            error:
+                'Noma’lum build buyrug‘i.'
+        };
+    }
+
+    async placeBlock(
+        position,
+        block
+    ) {
+
+        this.start();
+
+        if (
+            !position
+        ) {
+
+            return {
+                success: false,
+                error:
+                    'Blok koordinatasi berilmagan.'
+            };
+        }
+
+        if (
+            !block
+        ) {
+
+            return {
+                success: false,
+                error:
+                    'Qaysi blok qo‘yilishi ko‘rsatilmagan.'
+            };
+        }
+
+        const adapter =
+            this.getAdapter();
+
+        if (
+            !adapter
+        ) {
+
+            return {
+                success: false,
+                error:
+                    'Minecraft adapter topilmadi.'
+            };
+        }
+
+        if (
+            this.settings.safetyCheck &&
+            !this.isSafePosition(
+                position
+            )
+        ) {
+
+            return {
+                success: false,
+                error:
+                    'Joy xavfsizlik tekshiruvidan o‘tmadi.'
+            };
+        }
+
+        this.currentTask = {
+
+            type:
+                'place',
+
+            position:
+                this.normalizePosition(
+                    position
+                ),
+
+            block:
+                String(block),
+
+            startedAt:
+                Date.now()
+        };
+
+        this.busy = true;
+
+        context.eventBus.emitSafe(
+            'build:placing',
+            {
+                position:
+                    this.currentTask.position,
+
+                block:
+                    this.currentTask.block
+            }
+        );
+
+        try {
+
+            await this.moveNear(
+                position
+            );
+
+            await this.sleep(
+                this.settings.placeDelay
+            );
+
+            let result;
+
+            if (
+                typeof adapter.placeBlock ===
+                'function'
+            ) {
+
+                result =
+                    await adapter.placeBlock(
+                        this.normalizePosition(
+                            position
+                        ),
+                        String(block)
+                    );
+
+            } else if (
+                typeof adapter.place ===
+                'function'
+            ) {
+
+                result =
+                    await adapter.place(
+                        this.normalizePosition(
+                            position
+                        ),
+                        String(block)
+                    );
+
+            } else {
+
+                throw new Error(
+                    'Adapterda placeBlock/place funksiyasi yo‘q.'
+                );
+            }
+
+            const record = {
+
+                type:
+                    'place',
+
+                position:
+                    this.normalizePosition(
+                        position
+                    ),
+
+                block:
+                    String(block),
+
+                result,
+
+                timestamp:
+                    Date.now()
+            };
+
+            this.recordHistory(
+                record
+            );
+
+            context.eventBus.emitSafe(
+                'build:placed',
+                record
+            );
+
+            return {
+
+                success: true,
+
+                action:
+                    'place',
+
+                position:
+                    this.normalizePosition(
+                        position
+                    ),
+
+                block:
+                    String(block),
+
+                result
+            };
+
+        } catch (error) {
+
+            const failure = {
+
+                type:
+                    'place_failed',
+
+                position:
+                    this.normalizePosition(
+                        position
+                    ),
+
+                block:
+                    String(block),
+
+                error:
+                    error.message,
+
+                timestamp:
+                    Date.now()
+            };
+
+            this.recordHistory(
+                failure
+            );
+
+            context.eventBus.emitSafe(
+                'build:error',
+                failure
+            );
+
+            return {
+
+                success: false,
+
+                error:
+                    error.message
+            };
+
+        } finally {
+
+            this.busy = false;
+
+            this.currentTask = null;
+        }
+    }
+
+    async breakBlock(
+        position
+    ) {
+
+        this.start();
+
+        if (
+            !position
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Blok koordinatasi berilmagan.'
+            };
+        }
+
+        const adapter =
+            this.getAdapter();
+
+        if (
+            !adapter
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Minecraft adapter topilmadi.'
+            };
+        }
+
+        this.currentTask = {
+
+            type:
+                'break',
+
+            position:
+                this.normalizePosition(
+                    position
+                ),
+
+            startedAt:
+                Date.now()
+        };
+
+        this.busy = true;
+
+        context.eventBus.emitSafe(
+            'build:breaking',
+            {
+                position:
+                    this.currentTask.position
+            }
+        );
+
+        try {
+
+            await this.moveNear(
+                position
+            );
+
+            await this.sleep(
+                this.settings.breakDelay
+            );
+
+            let result;
+
+            if (
+                typeof adapter.breakBlock ===
+                'function'
+            ) {
+
+                result =
+                    await adapter.breakBlock(
+                        this.normalizePosition(
+                            position
+                        )
+                    );
+
+            } else if (
+                typeof adapter.break ===
+                'function'
+            ) {
+
+                result =
+                    await adapter.break(
+                        this.normalizePosition(
+                            position
+                        )
+                    );
+
+            } else {
+
+                throw new Error(
+                    'Adapterda breakBlock/break funksiyasi yo‘q.'
+                );
+            }
+
+            const record = {
+
+                type:
+                    'break',
+
+                position:
+                    this.normalizePosition(
+                        position
+                    ),
+
+                result,
+
+                timestamp:
+                    Date.now()
+            };
+
+            this.recordHistory(
+                record
+            );
+
+            context.eventBus.emitSafe(
+                'build:broken',
+                record
+            );
+
+            return {
+
+                success: true,
+
+                action:
+                    'break',
+
+                position:
+                    this.normalizePosition(
+                        position
+                    ),
+
+                result
+            };
+
+        } catch (error) {
+
+            const failure = {
+
+                type:
+                    'break_failed',
+
+                position:
+                    this.normalizePosition(
+                        position
+                    ),
+
+                error:
+                    error.message,
+
+                timestamp:
+                    Date.now()
+            };
+
+            this.recordHistory(
+                failure
+            );
+
+            context.eventBus.emitSafe(
+                'build:error',
+                failure
+            );
+
+            return {
+
+                success: false,
+
+                error:
+                    error.message
+            };
+
+        } finally {
+
+            this.busy = false;
+
+            this.currentTask = null;
+        }
+    }
+
+    async build(
+        plan
+    ) {
+
+        this.start();
+
+        if (
+            !Array.isArray(plan)
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Build plan massiv bo‘lishi kerak.'
+            };
+        }
+
+        if (
+            !plan.length
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Build plan bo‘sh.'
+            };
+        }
+
+        if (this.busy) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Hozir boshqa qurilish vazifasi bajarilmoqda.'
+            };
+        }
+
+        this.busy = true;
+
+        this.cancelRequested = false;
+
+        this.currentTask = {
+
+            type:
+                'build',
+
+            total:
+                plan.length,
+
+            completed:
+                0,
+
+            failed:
+                0,
+
+            startedAt:
+                Date.now()
+        };
+
+        this.tasks.push({
+            type:
+                'build',
+
+            total:
+                plan.length,
+
+            createdAt:
+                Date.now()
+        });
+
+        context.eventBus.emitSafe(
+            'build:plan_started',
+            {
+                total:
+                    plan.length
+            }
+        );
+
+        const results = [];
+
+        try {
+
+            for (
+                let i = 0;
+                i < plan.length;
+                i++
+            ) {
+
+                if (
+                    this.cancelRequested
+                ) {
+
+                    break;
+                }
+
+                const item =
+                    plan[i];
+
+                if (
+                    !item ||
+                    !item.position
+                ) {
+
+                    this.currentTask.failed++;
+
+                    results.push({
+
+                        success: false,
+
+                        index:
+                            i,
+
+                        error:
+                            'Noto‘g‘ri build item.'
+                    });
+
+                    continue;
+                }
+
+                let result;
+
+                if (
+                    item.action ===
+                    'break'
+                ) {
+
+                    result =
+                        await this.breakBlock(
+                            item.position
+                        );
+
+                } else {
+
+                    result =
+                        await this.placeBlock(
+                            item.position,
+
+                            item.block ||
+                            item.blockName
+                        );
+                }
+
+                results.push({
+
+                    index:
+                        i,
+
+                    ...result
+                });
+
+                if (
+                    result.success
+                ) {
+
+                    this.currentTask.completed++;
+
+                } else {
+
+                    this.currentTask.failed++;
+                }
+
+                context.eventBus.emitSafe(
+                    'build:progress',
+                    {
+
+                        completed:
+                            this.currentTask.completed,
+
+                        failed:
+                            this.currentTask.failed,
+
+                        total:
+                            plan.length,
+
+                        index:
+                            i
+                    }
+                );
+            }
+
+            const cancelled =
+                this.cancelRequested;
+
+            const summary = {
+
+                success:
+                    !cancelled &&
+                    this.currentTask.failed === 0,
+
+                cancelled,
+
+                total:
+                    plan.length,
+
+                completed:
+                    this.currentTask.completed,
+
+                failed:
+                    this.currentTask.failed,
+
+                results,
+
+                finishedAt:
+                    Date.now()
+            };
+
+            this.recordHistory({
+                type:
+                    'build_finished',
+
+                summary,
+
+                timestamp:
+                    Date.now()
+            });
+
+            context.eventBus.emitSafe(
+                'build:plan_finished',
+                summary
+            );
+
+            return summary;
+
+        } finally {
+
+            this.busy = false;
+
+            this.currentTask = null;
+
+            this.cancelRequested = false;
+        }
+    }
+
+    async moveNear(
+        position
+    ) {
+
+        const botPosition =
+            this.getPosition();
+
+        const distance =
+            this.distance(
+                botPosition,
+                position
+            );
+
+        if (
+            distance <=
+            this.settings.maxBuildDistance
+        ) {
+
+            return true;
+        }
+
+        const movement =
+            context.get(
+                'movement'
+            ) ||
+            context.get(
+                'movement-engine'
+            );
+
+        if (
+            movement &&
+            typeof movement.goto ===
+            'function'
+        ) {
+
+            await movement.goto(
+                position
+            );
+
+            return true;
+        }
+
+        const adapter =
+            this.getAdapter();
+
+        if (
+            adapter &&
+            typeof adapter.moveTo ===
+            'function'
+        ) {
+
+            await adapter.moveTo(
+                position
+            );
+
+            return true;
+        }
+
+        throw new Error(
+            'Bot blok oldiga bora olmaydi: movement engine topilmadi.'
+        );
+    }
+
+    isSafePosition(
+        position
+    ) {
+
+        const normalized =
+            this.normalizePosition(
+                position
+            );
+
+        if (
+            !Number.isFinite(
+                normalized.x
+            ) ||
+            !Number.isFinite(
+                normalized.y
+            ) ||
+            !Number.isFinite(
+                normalized.z
+            )
+        ) {
+
+            return false;
+        }
+
+        return true;
+    }
+
+    normalizePosition(
+        position
+    ) {
+
+        return {
+
+            x:
+                Number(
+                    position.x
+                ),
+
+            y:
+                Number(
+                    position.y
+                ),
+
+            z:
+                Number(
+                    position.z
+                )
+        };
+    }
+
+    getPosition() {
+
+        const adapter =
+            this.getAdapter();
+
+        if (
+            adapter &&
+            typeof adapter.getPosition ===
+            'function'
+        ) {
+
+            return adapter.getPosition();
+        }
+
+        return (
+            context.state.position ||
+            {
+                x: 0,
+                y: 0,
+                z: 0
+            }
+        );
+    }
+
+    getAdapter() {
+
+        return (
+            context.get(
+                'bedrock-adapter'
+            ) ||
+            context.get(
+                'minecraft-adapter'
+            )
+        );
+    }
+
+    distance(
+        a,
+        b
+    ) {
+
+        if (
+            !a ||
+            !b
+        ) {
+
+            return Infinity;
+        }
+
+        const dx =
+            Number(a.x) -
+            Number(b.x);
+
+        const dy =
+            Number(a.y) -
+            Number(b.y);
+
+        const dz =
+            Number(a.z) -
+            Number(b.z);
+
+        return Math.sqrt(
+            dx * dx +
+            dy * dy +
+            dz * dz
+        );
+    }
+
+    cancel() {
+
+        this.cancelRequested = true;
+
+        context.eventBus.emitSafe(
+            'build:cancel_requested',
+            {}
+        );
+
+        return {
+
+            success: true,
+
+            message:
+                'Qurilish to‘xtatish so‘rovi yuborildi.'
+        };
+    }
+
+    recordHistory(
+        entry
+    ) {
+
+        this.history.push(
+            entry
+        );
+
+        if (
+            this.history.length >
+            this.maxHistory
+        ) {
+
+            this.history.splice(
+                0,
+                this.history.length -
+                this.maxHistory
+            );
+        }
+    }
+
+    getHistory(
+        limit = 50
+    ) {
+
+        return this.history.slice(
+            -Math.max(
+                1,
+                Number(limit) || 50
+            )
+        );
+    }
+
+    getTasks(
+        limit = 50
+    ) {
+
+        return this.tasks.slice(
+            -Math.max(
+                1,
+                Number(limit) || 50
+            )
+        );
+    }
+
+    status() {
+
+        return {
+
+            running:
+                this.running,
+
+            busy:
+                this.busy,
+
+            currentTask:
+                this.currentTask,
+
+            queuedTasks:
+                this.tasks.length,
+
+            history:
+                this.history.length,
+
+            settings:
+                {
+                    ...this.settings
+                }
+        };
+    }
+
+    stop() {
+
+        this.cancelRequested = true;
+
+        this.running = false;
+
+        this.busy = false;
+
+        this.currentTask = null;
+
+        context.eventBus.emitSafe(
+            'build:stopped',
+            {}
+        );
+
+        logger.info(
+            'Build Engine to‘xtatildi.'
+        );
+    }
+
+    sleep(ms) {
+
+        return new Promise(
+            resolve =>
+                setTimeout(
+                    resolve,
+                    ms
+                )
+        );
+    }
+}
+
+const build =
+    new BuildEngine();
+
+module.exports =
+    build;
+
+module.exports.BuildEngine =
+    BuildEngine;
