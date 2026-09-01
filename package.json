@@ -1,0 +1,23 @@
+{
+  "name": "akv-bedrock-ai-agent",
+  "version": "1.0.0",
+  "description": "AKV autonomous Minecraft Bedrock 26.30 AI Agent",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "bedrock-protocol": "^3.58.3",
+    "dotenv": "^17.2.1",
+    "axios": "^1.11.0",
+    "better-sqlite3": "^12.2.0",
+    "express": "^5.1.0",
+    "grammy": "^1.38.2",
+    "uuid": "^11.1.0"
+  }
+}
