@@ -1,0 +1,652 @@
+'use strict';
+
+const crypto = require('crypto');
+const context = require('../core/agent-context');
+const logger = require('../core/logger');
+
+class PermissionManager {
+
+    constructor(options = {}) {
+
+        this.name = 'permission-manager';
+
+        this.running = false;
+
+        /*
+         * Faqat shu yerga ruxsat berilgan
+         * foydalanuvchilar buyruq bera oladi.
+         *
+         * Keyinchalik config.js orqali
+         * o'zgartirishimiz mumkin.
+         */
+
+        this.adminUsers =
+            new Set(
+                this.normalizeList(
+                    options.adminUsers || []
+                )
+            );
+
+        this.allowedChannels =
+            new Set(
+                this.normalizeList(
+                    options.allowedChannels ||
+                    [
+                        'telegram',
+                        'github',
+                        'web',
+                        'api'
+                    ]
+                )
+            );
+
+        this.requireUser =
+            options.requireUser !== false;
+
+        this.allowUnknownUser =
+            options.allowUnknownUser === true;
+
+        this.auditLog = [];
+
+        this.maxAuditLog =
+            Number(
+                options.maxAuditLog || 10000
+            );
+
+        this.stats = {
+
+            checked: 0,
+
+            allowed: 0,
+
+            rejected: 0
+        };
+
+        context.register(
+            'permission-manager',
+            this
+        );
+    }
+
+    start() {
+
+        if (this.running) {
+
+            return {
+                success: true,
+                alreadyRunning: true
+            };
+        }
+
+        this.running = true;
+
+        logger.info(
+            'Permission Manager ishga tushdi.'
+        );
+
+        return {
+            success: true
+        };
+    }
+
+    stop() {
+
+        this.running = false;
+
+        return {
+            success: true
+        };
+    }
+
+    normalizeList(
+        list
+    ) {
+
+        if (!Array.isArray(list)) {
+
+            return [];
+        }
+
+        return list
+            .map(
+                item =>
+                    String(item)
+                        .trim()
+                        .toLowerCase()
+            )
+            .filter(Boolean);
+    }
+
+    normalizeUser(
+        user
+    ) {
+
+        if (!user) {
+
+            return {
+                id: null,
+                username: null,
+                name: null
+            };
+        }
+
+        if (
+            typeof user ===
+            'string'
+        ) {
+
+            return {
+
+                id:
+                    user,
+
+                username:
+                    user
+            };
+        }
+
+        return {
+
+            id:
+                user.id ||
+                user.userId ||
+                null,
+
+            username:
+                user.username ||
+                null,
+
+            name:
+                user.name ||
+                user.firstName ||
+                null
+        };
+    }
+
+    async check(
+        request = {}
+    ) {
+
+        this.stats.checked++;
+
+        const user =
+            this.normalizeUser(
+                request.user
+            );
+
+        const channel =
+            String(
+                request.channel ||
+                request.source ||
+                ''
+            )
+            .trim()
+            .toLowerCase();
+
+        /*
+         * Kanal tekshiruvi.
+         */
+
+        if (
+            this.allowedChannels.size &&
+            !this.allowedChannels.has(
+                channel
+            )
+        ) {
+
+            return this.reject(
+                request,
+                'Bu kanal orqali buyruq berishga ruxsat yo‘q.'
+            );
+        }
+
+        /*
+         * User kerak bo‘lsa, noma’lum
+         * userlarni qabul qilmaymiz.
+         */
+
+        if (
+            this.requireUser &&
+            !user.id &&
+            !user.username
+        ) {
+
+            if (
+                !this.allowUnknownUser
+            ) {
+
+                return this.reject(
+                    request,
+                    'Foydalanuvchi aniqlanmadi.'
+                );
+            }
+        }
+
+        /*
+         * Admin ro‘yxati bo‘sh bo‘lsa:
+         *
+         * development rejimida ruxsat beriladi.
+         *
+         * Productionda config orqali admin
+         * ID kiritamiz.
+         */
+
+        if (
+            this.adminUsers.size
+        ) {
+
+            const identifiers = [
+
+                user.id,
+
+                user.username,
+
+                user.name
+            ]
+            .filter(Boolean)
+            .map(
+                value =>
+                    String(value)
+                        .trim()
+                        .toLowerCase()
+            );
+
+            const authorized =
+                identifiers.some(
+                    value =>
+                        this.adminUsers.has(
+                            value
+                        )
+                );
+
+            if (
+                !authorized
+            ) {
+
+                return this.reject(
+                    request,
+                    'Bu foydalanuvchiga botni boshqarish ruxsati berilmagan.'
+                );
+            }
+        }
+
+        /*
+         * Buyruq mavjudligini tekshiramiz.
+         */
+
+        if (
+            !request.command ||
+            !String(
+                request.command
+            ).trim()
+        ) {
+
+            return this.reject(
+                request,
+                'Bo‘sh buyruq.'
+            );
+        }
+
+        this.stats.allowed++;
+
+        const result = {
+
+            allowed: true,
+
+            user,
+
+            channel
+        };
+
+        this.audit(
+            request,
+            result
+        );
+
+        return result;
+    }
+
+    authorize(
+        request
+    ) {
+
+        return this.check(
+            request
+        );
+    }
+
+    reject(
+        request,
+        reason
+    ) {
+
+        this.stats.rejected++;
+
+        const result = {
+
+            allowed: false,
+
+            reason:
+
+                reason ||
+                'Ruxsat berilmadi.'
+        };
+
+        this.audit(
+            request,
+            result
+        );
+
+        logger.warn(
+            `Buyruq rad etildi: ${result.reason}`
+        );
+
+        return result;
+    }
+
+    addAdmin(
+        userId
+    ) {
+
+        const id =
+            String(
+                userId
+            )
+            .trim()
+            .toLowerCase();
+
+        if (!id) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'User ID bo‘sh.'
+            };
+        }
+
+        this.adminUsers.add(
+            id
+        );
+
+        return {
+            success: true,
+            user: id
+        };
+    }
+
+    removeAdmin(
+        userId
+    ) {
+
+        const id =
+            String(
+                userId
+            )
+            .trim()
+            .toLowerCase();
+
+        const existed =
+            this.adminUsers.delete(
+                id
+            );
+
+        return {
+
+            success:
+                existed,
+
+            user:
+                id
+        };
+    }
+
+    isAdmin(
+        user
+    ) {
+
+        const normalized =
+            this.normalizeUser(
+                user
+            );
+
+        const identifiers = [
+
+            normalized.id,
+
+            normalized.username,
+
+            normalized.name
+
+        ]
+        .filter(Boolean)
+        .map(
+            value =>
+                String(value)
+                    .trim()
+                    .toLowerCase()
+        );
+
+        return identifiers.some(
+            id =>
+                this.adminUsers.has(
+                    id
+                )
+        );
+    }
+
+    addChannel(
+        channel
+    ) {
+
+        const value =
+            String(
+                channel
+            )
+            .trim()
+            .toLowerCase();
+
+        if (!value) {
+
+            return {
+                success: false
+            };
+        }
+
+        this.allowedChannels.add(
+            value
+        );
+
+        return {
+            success: true,
+            channel: value
+        };
+    }
+
+    removeChannel(
+        channel
+    ) {
+
+        const value =
+            String(
+                channel
+            )
+            .trim()
+            .toLowerCase();
+
+        const existed =
+            this.allowedChannels.delete(
+                value
+            );
+
+        return {
+            success: existed,
+            channel: value
+        };
+    }
+
+    getAdmins() {
+
+        return [
+            ...this.adminUsers
+        ];
+    }
+
+    getChannels() {
+
+        return [
+            ...this.allowedChannels
+        ];
+    }
+
+    audit(
+        request,
+        result
+    ) {
+
+        const entry = {
+
+            id:
+                this.generateId(),
+
+            timestamp:
+                Date.now(),
+
+            requestId:
+                request?.requestId ||
+                null,
+
+            source:
+                request?.source ||
+                null,
+
+            channel:
+                request?.channel ||
+                null,
+
+            user:
+                request?.user ||
+                null,
+
+            command:
+                request?.command ||
+                null,
+
+            allowed:
+                result?.allowed === true,
+
+            reason:
+                result?.reason ||
+                null
+        };
+
+        this.auditLog.push(
+            entry
+        );
+
+        if (
+            this.auditLog.length >
+            this.maxAuditLog
+        ) {
+
+            this.auditLog.splice(
+                0,
+                this.auditLog.length -
+                this.maxAuditLog
+            );
+        }
+
+        /*
+         * Security eventini Event Busga ham
+         * chiqaramiz.
+         */
+
+        if (
+            context.eventBus &&
+            typeof context.eventBus.emit ===
+            'function'
+        ) {
+
+            context.eventBus.emit(
+                'security:permission',
+                entry
+            );
+        }
+    }
+
+    getAuditLog(
+        limit = 100
+    ) {
+
+        return this.auditLog
+            .slice(
+                -Math.max(
+                    1,
+                    Number(limit) || 100
+                )
+            )
+            .reverse();
+    }
+
+    clearAuditLog() {
+
+        this.auditLog = [];
+
+        return {
+            success: true
+        };
+    }
+
+    getStats() {
+
+        return {
+
+            running:
+                this.running,
+
+            admins:
+                this.adminUsers.size,
+
+            channels:
+                this.allowedChannels.size,
+
+            audit:
+                this.auditLog.length,
+
+            checked:
+                this.stats.checked,
+
+            allowed:
+                this.stats.allowed,
+
+            rejected:
+                this.stats.rejected
+        };
+    }
+
+    generateId() {
+
+        return (
+            'perm_' +
+            Date.now()
+                .toString(36) +
+            '_' +
+            crypto.randomBytes(
+                5
+            )
+            .toString(
+                'hex'
+            )
+        );
+    }
+}
+
+const permissionManager =
+    new PermissionManager();
+
+module.exports =
+    permissionManager;
+
+module.exports.PermissionManager =
+    PermissionManager;
