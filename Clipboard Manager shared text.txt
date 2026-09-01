@@ -1,0 +1,1447 @@
+'use strict';
+
+const context = require('../core/agent-context');
+const logger = require('../core/logger');
+
+class CombatEngine {
+
+    constructor() {
+
+        this.running = false;
+
+        this.inCombat = false;
+
+        this.target = null;
+
+        this.targetId = null;
+
+        this.mode = 'manual';
+
+        this.stopRequested = false;
+
+        this.attackRange = 3.2;
+
+        this.detectionRange = 32;
+
+        this.retreatHealth = 5;
+
+        this.minimumHealth = 1;
+
+        this.attackCooldown = 550;
+
+        this.lastAttack = 0;
+
+        this.lastTargetScan = 0;
+
+        this.targetScanInterval = 200;
+
+        this.combatHistory = [];
+
+        this.maxHistory = 1000;
+
+        this.statistics = {
+
+            attacks: 0,
+
+            targetsFound: 0,
+
+            targetsLost: 0,
+
+            retreats: 0,
+
+            kills: 0,
+
+            deaths: 0
+        };
+    }
+
+    start() {
+
+        if (this.running) {
+            return;
+        }
+
+        this.running = true;
+
+        logger.info(
+            'Combat Engine ishga tushdi.'
+        );
+
+        context.eventBus.emitSafe(
+            'combat:started',
+            {}
+        );
+    }
+
+    async execute(action = {}) {
+
+        this.start();
+
+        const type =
+            String(
+                action.type ||
+                action.action ||
+                action.command ||
+                ''
+            )
+                .toLowerCase()
+                .trim();
+
+        switch (type) {
+
+            case 'attack':
+            case 'fight':
+            case 'jang':
+                return this.fight(
+                    action.target ||
+                    action.player ||
+                    action.entity
+                );
+
+            case 'defend':
+            case 'defense':
+            case 'himoya':
+                return this.defend();
+
+            case 'retreat':
+            case 'escape':
+            case 'qoch':
+                return this.retreat();
+
+            case 'stop':
+                return this.stop();
+
+            default:
+
+                if (
+                    action.target ||
+                    action.player
+                ) {
+
+                    return this.fight(
+                        action.target ||
+                        action.player
+                    );
+                }
+
+                return {
+
+                    success: false,
+
+                    error:
+                        'Noma’lum combat buyrug‘i.'
+                };
+        }
+    }
+
+    async fight(
+        targetName = null
+    ) {
+
+        this.start();
+
+        this.stopRequested = false;
+
+        this.inCombat = true;
+
+        this.mode =
+            targetName
+                ? 'targeted'
+                : 'automatic';
+
+        this.target = null;
+
+        this.targetId = null;
+
+        context.eventBus.emitSafe(
+            'combat:started_fight',
+            {
+                target:
+                    targetName
+            }
+        );
+
+        logger.info(
+            targetName
+                ? `Jang boshlandi: ${targetName}`
+                : 'Avtomatik jang boshlandi.'
+        );
+
+        try {
+
+            if (
+                targetName
+            ) {
+
+                const found =
+                    await this.acquireTarget(
+                        targetName
+                    );
+
+                if (!found) {
+
+                    return {
+
+                        success: false,
+
+                        error:
+                            `Nishon topilmadi: ${targetName}`
+                    };
+                }
+            }
+
+            while (
+                !this.stopRequested
+            ) {
+
+                const health =
+                    this.getHealth();
+
+                if (
+                    health <=
+                    this.retreatHealth
+                ) {
+
+                    this.statistics.retreats++;
+
+                    context.eventBus.emitSafe(
+                        'combat:low_health',
+                        {
+                            health
+                        }
+                    );
+
+                    await this.retreat();
+
+                    return {
+
+                        success: true,
+
+                        action:
+                            'retreat',
+
+                        reason:
+                            'health_low',
+
+                        health
+                    };
+                }
+
+                if (
+                    !this.target
+                ) {
+
+                    const acquired =
+                        await this.findTarget();
+
+                    if (
+                        !acquired
+                    ) {
+
+                        await this.sleep(
+                            200
+                        );
+
+                        if (
+                            targetName
+                        ) {
+
+                            break;
+                        }
+
+                        continue;
+                    }
+                }
+
+                const target =
+                    this.resolveTarget();
+
+                if (
+                    !target
+                ) {
+
+                    this.statistics.targetsLost++;
+
+                    this.target = null;
+
+                    this.targetId = null;
+
+                    if (
+                        targetName
+                    ) {
+                        break;
+                    }
+
+                    continue;
+                }
+
+                const position =
+                    this.getPosition();
+
+                const targetPosition =
+                    this.getTargetPosition(
+                        target
+                    );
+
+                if (
+                    !targetPosition
+                ) {
+
+                    this.target = null;
+
+                    this.targetId = null;
+
+                    continue;
+                }
+
+                const distance =
+                    this.distance(
+                        position,
+                        targetPosition
+                    );
+
+                context.eventBus.emitSafe(
+                    'combat:observation',
+                    {
+
+                        target:
+                            this.describeTarget(
+                                target
+                            ),
+
+                        distance,
+
+                        botHealth:
+                            health
+                    }
+                );
+
+                if (
+                    distance >
+                    this.detectionRange * 1.5
+                ) {
+
+                    this.target = null;
+
+                    this.targetId = null;
+
+                    continue;
+                }
+
+                if (
+                    distance >
+                    this.attackRange
+                ) {
+
+                    await this.approach(
+                        targetPosition
+                    );
+
+                } else {
+
+                    await this.attackTarget(
+                        target
+                    );
+                }
+
+                await this.sleep(
+                    50
+                );
+            }
+
+            return {
+
+                success: true,
+
+                stopped:
+                    this.stopRequested,
+
+                target:
+                    this.target
+                        ? this.describeTarget(
+                            this.target
+                        )
+                        : null
+            };
+
+        } finally {
+
+            this.inCombat = false;
+
+            context.eventBus.emitSafe(
+                'combat:finished',
+                {}
+            );
+        }
+    }
+
+    async acquireTarget(
+        name
+    ) {
+
+        const observer =
+            this.getObserver();
+
+        if (
+            !observer
+        ) {
+            return false;
+        }
+
+        const target =
+            observer.getPlayer
+                ? observer.getPlayer(
+                    name
+                )
+                : null;
+
+        if (
+            target
+        ) {
+
+            this.target =
+                target;
+
+            this.targetId =
+                target.id ||
+                target.uuid ||
+                target.name;
+
+            this.statistics.targetsFound++;
+
+            return true;
+        }
+
+        const entities =
+            typeof observer.getEntities ===
+                'function'
+                ? observer.getEntities()
+                : [];
+
+        for (
+            const entity of entities
+        ) {
+
+            if (
+                String(
+                    entity.name ||
+                    entity.id
+                ).toLowerCase() ===
+                String(name).toLowerCase()
+            ) {
+
+                this.target =
+                    entity;
+
+                this.targetId =
+                    entity.id;
+
+                this.statistics.targetsFound++;
+
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    async findTarget() {
+
+        const now =
+            Date.now();
+
+        if (
+            now -
+            this.lastTargetScan <
+            this.targetScanInterval
+        ) {
+
+            return Boolean(
+                this.target
+            );
+        }
+
+        this.lastTargetScan =
+            now;
+
+        const observer =
+            this.getObserver();
+
+        if (
+            !observer
+        ) {
+
+            return false;
+        }
+
+        const position =
+            this.getPosition();
+
+        const players =
+            typeof observer.getNearbyPlayers ===
+                'function'
+                ? observer.getNearbyPlayers(
+                    position,
+                    this.detectionRange
+                )
+                : (
+                    typeof observer.getPlayers ===
+                    'function'
+                        ? observer.getPlayers()
+                        : []
+                );
+
+        const entities =
+            typeof observer.getNearbyEntities ===
+                'function'
+                ? observer.getNearbyEntities(
+                    position,
+                    this.detectionRange
+                )
+                : [];
+
+        const candidates = [];
+
+        for (
+            const player of players
+        ) {
+
+            if (
+                !this.isValidTarget(
+                    player
+                )
+            ) {
+                continue;
+            }
+
+            candidates.push({
+                object:
+                    player,
+
+                priority:
+                    this.targetPriority(
+                        player
+                    )
+            });
+        }
+
+        for (
+            const entity of entities
+        ) {
+
+            if (
+                !this.isHostileEntity(
+                    entity
+                )
+            ) {
+                continue;
+            }
+
+            candidates.push({
+                object:
+                    entity,
+
+                priority:
+                    this.targetPriority(
+                        entity
+                    )
+            });
+        }
+
+        if (
+            !candidates.length
+        ) {
+
+            return false;
+        }
+
+        candidates.sort(
+            (a, b) =>
+                b.priority -
+                a.priority
+        );
+
+        const selected =
+            candidates[0].object;
+
+        this.target =
+            selected;
+
+        this.targetId =
+            selected.id ||
+            selected.uuid ||
+            selected.name;
+
+        this.statistics.targetsFound++;
+
+        context.eventBus.emitSafe(
+            'combat:target_acquired',
+            {
+                target:
+                    this.describeTarget(
+                        selected
+                    )
+            }
+        );
+
+        logger.info(
+            `Combat target: ${
+                selected.name ||
+                selected.type ||
+                selected.id
+            }`
+        );
+
+        return true;
+    }
+
+    resolveTarget() {
+
+        if (
+            !this.target
+        ) {
+            return null;
+        }
+
+        const observer =
+            this.getObserver();
+
+        if (
+            !observer
+        ) {
+            return this.target;
+        }
+
+        const name =
+            this.target.name;
+
+        if (
+            name &&
+            typeof observer.getPlayer ===
+                'function'
+        ) {
+
+            const latest =
+                observer.getPlayer(
+                    name
+                );
+
+            if (
+                latest
+            ) {
+
+                this.target =
+                    latest;
+
+                return latest;
+            }
+        }
+
+        if (
+            this.target.id &&
+            typeof observer.getEntity ===
+                'function'
+        ) {
+
+            const latest =
+                observer.getEntity(
+                    this.target.id
+                );
+
+            if (
+                latest
+            ) {
+
+                this.target =
+                    latest;
+
+                return latest;
+            }
+        }
+
+        return this.target;
+    }
+
+    async approach(
+        targetPosition
+    ) {
+
+        const movement =
+            context.get(
+                'movement'
+            ) ||
+            context.get(
+                'movement-engine'
+            );
+
+        const adapter =
+            context.get(
+                'bedrock-adapter'
+            ) ||
+            context.get(
+                'movement-adapter'
+            );
+
+        if (
+            adapter &&
+            typeof adapter.moveTo ===
+                'function'
+        ) {
+
+            await adapter.moveTo(
+                targetPosition
+            );
+
+            return;
+        }
+
+        if (
+            movement &&
+            typeof movement.goto ===
+                'function'
+        ) {
+
+            await movement.goto(
+                targetPosition
+            );
+
+            return;
+        }
+
+        context.eventBus.emitSafe(
+            'combat:cannot_approach',
+            {
+                targetPosition
+            }
+        );
+    }
+
+    async attackTarget(
+        target
+    ) {
+
+        const now =
+            Date.now();
+
+        if (
+            now -
+            this.lastAttack <
+            this.attackCooldown
+        ) {
+
+            return;
+        }
+
+        this.lastAttack =
+            now;
+
+        const adapter =
+            context.get(
+                'bedrock-adapter'
+            );
+
+        if (
+            !adapter
+        ) {
+
+            return;
+        }
+
+        const targetId =
+            target.id ||
+            target.runtime_id ||
+            target.entityId;
+
+        if (
+            targetId === undefined ||
+            targetId === null
+        ) {
+
+            context.eventBus.emitSafe(
+                'combat:attack_failed',
+                {
+                    reason:
+                        'target_id_missing',
+
+                    target:
+                        this.describeTarget(
+                            target
+                        )
+                }
+            );
+
+            return;
+        }
+
+        await this.faceTarget(
+            target
+        );
+
+        try {
+
+            const result =
+                await adapter.attack(
+                    targetId
+                );
+
+            this.statistics.attacks++;
+
+            this.recordCombatEvent({
+
+                type:
+                    'attack',
+
+                target:
+                    this.describeTarget(
+                        target
+                    ),
+
+                result,
+
+                timestamp:
+                    Date.now()
+            });
+
+            context.eventBus.emitSafe(
+                'combat:attack',
+                {
+                    target:
+                        this.describeTarget(
+                            target
+                        ),
+
+                    result
+                }
+            );
+
+        } catch (error) {
+
+            context.eventBus.emitSafe(
+                'combat:attack_failed',
+                {
+                    target:
+                        this.describeTarget(
+                            target
+                        ),
+
+                    error:
+                        error.message
+                }
+            );
+        }
+    }
+
+    async faceTarget(
+        target
+    ) {
+
+        const position =
+            this.getPosition();
+
+        const targetPosition =
+            this.getTargetPosition(
+                target
+            );
+
+        if (
+            !targetPosition
+        ) {
+            return;
+        }
+
+        const dx =
+            targetPosition.x -
+            position.x;
+
+        const dz =
+            targetPosition.z -
+            position.z;
+
+        const horizontal =
+            Math.sqrt(
+                dx * dx +
+                dz * dz
+            );
+
+        if (
+            horizontal <
+            0.01
+        ) {
+            return;
+        }
+
+        const yaw =
+            Math.atan2(
+                -dx,
+                dz
+            ) *
+            180 /
+            Math.PI;
+
+        let pitch = 0;
+
+        if (
+            targetPosition.y !==
+            undefined
+        ) {
+
+            const dy =
+                targetPosition.y -
+                position.y;
+
+            pitch =
+                -Math.atan2(
+                    dy,
+                    horizontal
+                ) *
+                180 /
+                Math.PI;
+        }
+
+        const adapter =
+            context.get(
+                'bedrock-adapter'
+            );
+
+        if (
+            adapter &&
+            typeof adapter.look ===
+                'function'
+        ) {
+
+            await adapter.look(
+                yaw,
+                pitch
+            );
+        }
+    }
+
+    async defend() {
+
+        this.mode =
+            'defense';
+
+        this.stopRequested = false;
+
+        this.inCombat = true;
+
+        context.eventBus.emitSafe(
+            'combat:defense_started',
+            {}
+        );
+
+        return this.fight();
+    }
+
+    async retreat() {
+
+        this.stopRequested = false;
+
+        const movement =
+            context.get(
+                'movement'
+            ) ||
+            context.get(
+                'movement-engine'
+            );
+
+        const position =
+            this.getPosition();
+
+        const target =
+            this.target;
+
+        let retreatPosition = {
+
+            x:
+                position.x,
+
+            y:
+                position.y,
+
+            z:
+                position.z
+        };
+
+        if (
+            target
+        ) {
+
+            const targetPosition =
+                this.getTargetPosition(
+                    target
+                );
+
+            if (
+                targetPosition
+            ) {
+
+                const dx =
+                    position.x -
+                    targetPosition.x;
+
+                const dz =
+                    position.z -
+                    targetPosition.z;
+
+                const length =
+                    Math.sqrt(
+                        dx * dx +
+                        dz * dz
+                    ) ||
+                    1;
+
+                retreatPosition = {
+
+                    x:
+                        position.x +
+                        (
+                            dx /
+                            length
+                        ) *
+                        10,
+
+                    y:
+                        position.y,
+
+                    z:
+                        position.z +
+                        (
+                            dz /
+                            length
+                        ) *
+                        10
+                };
+            }
+        } else {
+
+            retreatPosition.z -= 10;
+        }
+
+        this.statistics.retreats++;
+
+        context.eventBus.emitSafe(
+            'combat:retreat',
+            {
+                from:
+                    position,
+
+                to:
+                    retreatPosition
+            }
+        );
+
+        if (
+            movement &&
+            typeof movement.goto ===
+                'function'
+        ) {
+
+            await movement.goto(
+                retreatPosition
+            );
+        }
+
+        return {
+
+            success: true,
+
+            action:
+                'retreat',
+
+            position:
+                retreatPosition
+        };
+    }
+
+    isValidTarget(
+        player
+    ) {
+
+        if (
+            !player
+        ) {
+            return false;
+        }
+
+        const name =
+            String(
+                player.name ||
+                ''
+            );
+
+        const botName =
+            String(
+                context.state.username ||
+                ''
+            );
+
+        if (
+            name &&
+            botName &&
+            name === botName
+        ) {
+
+            return false;
+        }
+
+        return Boolean(
+            player.position ||
+            player.pos
+        );
+    }
+
+    isHostileEntity(
+        entity
+    ) {
+
+        if (
+            !entity
+        ) {
+            return false;
+        }
+
+        const type =
+            String(
+                entity.type ||
+                entity.name ||
+                ''
+            ).toLowerCase();
+
+        const hostileTypes = [
+
+            'zombie',
+            'husk',
+            'drowned',
+            'skeleton',
+            'stray',
+            'wither_skeleton',
+            'spider',
+            'cave_spider',
+            'creeper',
+            'witch',
+            'blaze',
+            'ghast',
+            'enderman',
+            'piglin',
+            'piglin_brute',
+            'magma_cube',
+            'slime',
+            'phantom',
+            'ravager',
+            'vindicator',
+            'pillager',
+            'evoker',
+            'vex'
+        ];
+
+        return hostileTypes.some(
+            hostile =>
+                type.includes(
+                    hostile
+                )
+        );
+    }
+
+    targetPriority(
+        target
+    ) {
+
+        const position =
+            this.getPosition();
+
+        const targetPosition =
+            this.getTargetPosition(
+                target
+            );
+
+        if (
+            !targetPosition
+        ) {
+            return -Infinity;
+        }
+
+        const distance =
+            this.distance(
+                position,
+                targetPosition
+            );
+
+        let score =
+            100 -
+            distance;
+
+        if (
+            target.name
+        ) {
+            score += 20;
+        }
+
+        if (
+            target.health !==
+            null &&
+            target.health !==
+            undefined
+        ) {
+
+            score +=
+                Math.max(
+                    0,
+                    20 -
+                    Number(
+                        target.health
+                    )
+                );
+        }
+
+        return score;
+    }
+
+    getTargetPosition(
+        target
+    ) {
+
+        return (
+            target?.position ||
+            target?.pos ||
+            target?.coordinates ||
+            null
+        );
+    }
+
+    getObserver() {
+
+        return (
+            context.get(
+                'world-observer'
+            ) ||
+            context.get(
+                'observer'
+            )
+        );
+    }
+
+    getPosition() {
+
+        const adapter =
+            context.get(
+                'bedrock-adapter'
+            );
+
+        if (
+            adapter &&
+            typeof adapter.getPosition ===
+                'function'
+        ) {
+
+            return adapter.getPosition();
+        }
+
+        return (
+            context.state.position ||
+            {
+                x: 0,
+                y: 0,
+                z: 0
+            }
+        );
+    }
+
+    getHealth() {
+
+        const adapter =
+            context.get(
+                'bedrock-adapter'
+            );
+
+        if (
+            adapter &&
+            typeof adapter.getHealth ===
+                'function'
+        ) {
+
+            return Number(
+                adapter.getHealth()
+            );
+        }
+
+        return Number(
+            context.state.health ||
+            20
+        );
+    }
+
+    distance(
+        a,
+        b
+    ) {
+
+        const dx =
+            a.x - b.x;
+
+        const dy =
+            a.y - b.y;
+
+        const dz =
+            a.z - b.z;
+
+        return Math.sqrt(
+            dx * dx +
+            dy * dy +
+            dz * dz
+        );
+    }
+
+    describeTarget(
+        target
+    ) {
+
+        if (!target) {
+            return null;
+        }
+
+        return {
+
+            id:
+                target.id ||
+                target.runtime_id ||
+                null,
+
+            name:
+                target.name ||
+                null,
+
+            type:
+                target.type ||
+                null,
+
+            position:
+                this.getTargetPosition(
+                    target
+                ),
+
+            health:
+                target.health ??
+                null
+        };
+    }
+
+    recordCombatEvent(
+        event
+    ) {
+
+        this.combatHistory.push(
+            event
+        );
+
+        if (
+            this.combatHistory.length >
+            this.maxHistory
+        ) {
+
+            this.combatHistory.shift();
+        }
+    }
+
+    stop() {
+
+        this.stopRequested = true;
+
+        this.inCombat = false;
+
+        this.target = null;
+
+        this.targetId = null;
+
+        context.eventBus.emitSafe(
+            'combat:stopped',
+            {}
+        );
+
+        logger.info(
+            'Combat Engine to‘xtatildi.'
+        );
+
+        return {
+
+            success: true,
+
+            stopped: true
+        };
+    }
+
+    status() {
+
+        return {
+
+            running:
+                this.running,
+
+            inCombat:
+                this.inCombat,
+
+            mode:
+                this.mode,
+
+            target:
+                this.describeTarget(
+                    this.target
+                ),
+
+            attackRange:
+                this.attackRange,
+
+            detectionRange:
+                this.detectionRange,
+
+            statistics:
+                {
+                    ...this.statistics
+                }
+        };
+    }
+
+    getHistory(
+        limit = 50
+    ) {
+
+        return this.combatHistory.slice(
+            -Math.max(
+                1,
+                Number(limit) || 50
+            )
+        );
+    }
+
+    async shutdown() {
+
+        this.stop();
+
+        this.running = false;
+
+        context.eventBus.emitSafe(
+            'combat:shutdown',
+            {}
+        );
+    }
+
+    sleep(ms) {
+
+        return new Promise(
+            resolve =>
+                setTimeout(
+                    resolve,
+                    ms
+                )
+        );
+    }
+}
+
+const combat =
+    new CombatEngine();
+
+module.exports =
+    combat;
+
+module.exports.CombatEngine =
+    CombatEngine;
