@@ -2,37 +2,88 @@
 
 require('dotenv').config();
 
+/*
+===============================================================
+ AKV BEDROCK AI AGENT
+ CONFIGURATION
+===============================================================
+
+ Minecraft:
+   Address : Soloraft.aternos.me
+   Port    : 27295
+   Version : 1.26.30
+   Bot     : AKV_AI
+
+ DIQQAT:
+ OpenRouter API key va Telegram token bu faylga yozilmaydi.
+ Ular .env / GitHub Secrets orqali beriladi.
+===============================================================
+*/
+
 const config = {
+
+    /* =========================================================
+       MINECRAFT
+    ========================================================= */
 
     minecraft: {
 
         /*
-        .env orqali o'zgartirish mumkin.
+        Server manzili.
+        Agar .env da MC_HOST berilsa,
+        .env qiymati ustun bo'ladi.
         */
 
         host:
             process.env.MC_HOST ||
-            '',
+            'Soloraft.aternos.me',
+
+        /*
+        Bedrock server porti.
+        */
 
         port:
             Number(
                 process.env.MC_PORT ||
-                19132
+                27295
             ),
+
+        /*
+        Minecraft Bedrock versiyasi.
+        */
 
         version:
             process.env.MC_VERSION ||
             '1.26.30',
 
+        /*
+        Bot username.
+        */
+
         username:
             process.env.MC_USERNAME ||
             'AKV_AI',
 
+        /*
+        Bedrock authentication.
+
+        true  = offline/local authentication
+        false = Microsoft authentication kerak bo'lishi mumkin
+        */
+
         offline:
             process.env.MC_OFFLINE !== 'false',
 
+        /*
+        Aloqa uzilsa avtomatik qayta ulanadi.
+        */
+
         autoReconnect:
             process.env.MC_AUTO_RECONNECT !== 'false',
+
+        /*
+        Birinchi reconnect kutish vaqti.
+        */
 
         reconnectDelay:
             Number(
@@ -41,12 +92,23 @@ const config = {
             )
     },
 
+    /* =========================================================
+       AI
+    ========================================================= */
+
     ai: {
 
         enabled: true,
 
-        autonomous:
-            true,
+        /*
+        AI agent mustaqil qaror qabul qilishi mumkin.
+        */
+
+        autonomous: true,
+
+        /*
+        OpenRouter modeli.
+        */
 
         model:
             process.env.AI_MODEL ||
@@ -60,20 +122,29 @@ const config = {
 
         /*
         AI har qaroridan oldin
-        dunyo holatini tekshiradi.
+        mavjud dunyo holatini tekshiradi.
         */
 
         decisionInterval:
             1500
     },
 
+    /* =========================================================
+       OPENROUTER
+    ========================================================= */
+
     openrouter: {
+
+        /*
+        API key .env yoki GitHub Secretdan olinadi.
+        */
 
         apiKey:
             process.env.OPENROUTER_API_KEY ||
             '',
 
         baseURL:
+            process.env.OPENROUTER_BASE_URL ||
             'https://openrouter.ai/api/v1',
 
         timeout:
@@ -82,6 +153,10 @@ const config = {
         maxRetries:
             3
     },
+
+    /* =========================================================
+       MEMORY
+    ========================================================= */
 
     memory: {
 
@@ -92,80 +167,137 @@ const config = {
             './data/memory/akv-memory.db',
 
         /*
-        Xotira o'chirilmaydi,
-        faqat kerak bo'lsa arxivlanadi.
+        Uzoq muddatli xotira.
         */
 
-        permanent:
-            true,
+        permanent: true,
+
+        /*
+        Oxirgi chat xabarlari.
+        */
 
         maxRecentMessages:
             1000,
 
+        /*
+        Kuzatilgan world/entity ma'lumotlari.
+        */
+
         maxObservations:
             100000
     },
+
+    /* =========================================================
+       OBSERVER
+    ========================================================= */
 
     observer: {
 
         enabled: true,
 
         /*
-        Dunyo kuzatuvi.
+        Playerlarni kuzatish.
         */
 
         watchPlayers:
             true,
 
+        /*
+        Mob va boshqa entitylarni kuzatish.
+        */
+
         watchEntities:
             true,
+
+        /*
+        Chatni kuzatish.
+        */
 
         watchChat:
             true,
 
+        /*
+        Block/world o'zgarishlarini kuzatish.
+        */
+
         watchBlocks:
             true,
+
+        /*
+        Combat eventlarini kuzatish.
+        */
 
         watchCombat:
             true,
 
+        /*
+        Harakatlarni kuzatish.
+        */
+
         watchMovement:
             true,
+
+        /*
+        Mavjud kuzatuv ma'lumotlarini imkon qadar
+        to'liq yig'ish.
+        */
 
         reportEverything:
             true,
 
         /*
-        true bo'lsa kuzatuv botga
-        tashqi kanal orqali ham yuboriladi.
+        Real-time observer.
         */
 
         realtime:
             true
     },
 
+    /* =========================================================
+       COMMANDS
+    ========================================================= */
+
     commands: {
+
+        /*
+        Remote commandlar.
+        */
 
         remote:
             true,
 
+        /*
+        Telegram orqali command.
+        */
+
         telegram:
             true,
 
+        /*
+        GitHub orqali command.
+        */
+
         github:
             true,
+
+        /*
+        Minecraft chat orqali command.
+        */
 
         minecraftChat:
             true,
 
         /*
-        Tashqaridan kelgan buyruqlar
-        bir xil Command Routerga boradi.
+        Xavfli commandlar uchun tasdiqlash.
         */
 
         requireConfirmationForDangerous:
             true
     },
+
+    /* =========================================================
+       TELEGRAM
+    ========================================================= */
 
     telegram: {
 
@@ -183,6 +315,10 @@ const config = {
             ''
     },
 
+    /* =========================================================
+       GITHUB
+    ========================================================= */
+
     github: {
 
         enabled:
@@ -199,8 +335,7 @@ const config = {
             '',
 
         /*
-        GitHub orqali command yuborish
-        keyingi modulda implement qilinadi.
+        GitHub command polling interval.
         */
 
         pollInterval:
@@ -210,13 +345,16 @@ const config = {
             )
     },
 
+    /* =========================================================
+       REPORTS
+    ========================================================= */
+
     reports: {
 
         enabled: true,
 
         /*
-        AI o'zi muhim voqealarni
-        xabar qilib turadi.
+        AI muhim voqealar haqida xabar beradi.
         */
 
         autonomousReports:
@@ -238,20 +376,30 @@ const config = {
             true
     },
 
+    /* =========================================================
+       SECURITY
+    ========================================================= */
+
     security: {
 
         /*
-        Tashqi buyruqlarni faqat
-        ruxsat berilgan foydalanuvchilar
-        yubora olishi kerak.
+        Tashqi commandlar authenticationdan o'tadi.
         */
 
         requireAuthentication:
             true,
 
+        /*
+        Noma'lum commandlarni bajarishni taqiqlash.
+        */
+
         allowUnknownCommands:
             false
     },
+
+    /* =========================================================
+       LOGGING
+    ========================================================= */
 
     logging: {
 
@@ -261,5 +409,33 @@ const config = {
             process.env.DEBUG === 'true'
     }
 };
+
+
+/* =============================================================
+   CONFIG VALIDATION
+============================================================= */
+
+if (!config.minecraft.host) {
+
+    throw new Error(
+        'Minecraft server manzili topilmadi.'
+    );
+}
+
+if (
+    !Number.isInteger(config.minecraft.port) ||
+    config.minecraft.port <= 0 ||
+    config.minecraft.port > 65535
+) {
+
+    throw new Error(
+        `Minecraft port noto'g'ri: ${config.minecraft.port}`
+    );
+}
+
+
+/* =============================================================
+   EXPORT
+============================================================= */
 
 module.exports = config;
