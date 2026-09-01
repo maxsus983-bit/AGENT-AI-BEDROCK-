@@ -1,0 +1,298 @@
+'use strict';
+
+const crypto = require('crypto');
+const context = require('../core/agent-context');
+const logger = require('../core/logger');
+
+class SecretManager {
+
+    constructor(options = {}) {
+
+        this.name =
+            'secret-manager';
+
+        this.secrets =
+            new Map();
+
+        this.environmentMap = {
+
+            OPENROUTER_API_KEY:
+                'OPENROUTER_API_KEY',
+
+            TELEGRAM_BOT_TOKEN:
+                'TELEGRAM_BOT_TOKEN',
+
+            GITHUB_TOKEN:
+                'GITHUB_TOKEN'
+        };
+
+        /*
+         * Secretlarni kod ichiga yozmaymiz.
+         * Environment variable ishlatiladi.
+         */
+
+        this.registerEnvironmentSecrets();
+
+        context.register(
+            'secret-manager',
+            this
+        );
+    }
+
+    registerEnvironmentSecrets() {
+
+        for (
+            const [name, envName]
+            of Object.entries(
+                this.environmentMap
+            )
+        ) {
+
+            const value =
+                process.env[envName];
+
+            if (
+                value &&
+                String(value).trim()
+            ) {
+
+                this.secrets.set(
+                    name,
+                    String(value).trim()
+                );
+            }
+        }
+    }
+
+    set(
+        name,
+        value
+    ) {
+
+        const key =
+            String(
+                name
+            )
+            .trim();
+
+        if (!key) {
+
+            throw new Error(
+                'Secret nomi bo‘sh.'
+            );
+        }
+
+        if (
+            value === undefined ||
+            value === null ||
+            String(value).trim() === ''
+        ) {
+
+            throw new Error(
+                `Secret qiymati bo‘sh: ${key}`
+            );
+        }
+
+        this.secrets.set(
+            key,
+            String(value).trim()
+        );
+
+        return true;
+    }
+
+    get(
+        name,
+        fallback = null
+    ) {
+
+        const key =
+            String(
+                name
+            )
+            .trim();
+
+        if (
+            this.secrets.has(key)
+        ) {
+
+            return this.secrets.get(
+                key
+            );
+        }
+
+        const envName =
+            this.environmentMap[key] ||
+            key;
+
+        if (
+            process.env[envName]
+        ) {
+
+            return String(
+                process.env[envName]
+            ).trim();
+        }
+
+        return fallback;
+    }
+
+    has(
+        name
+    ) {
+
+        return Boolean(
+            this.get(
+                name,
+                null
+            )
+        );
+    }
+
+    remove(
+        name
+    ) {
+
+        return this.secrets.delete(
+            String(name).trim()
+        );
+    }
+
+    /*
+     * Secretni hech qachon logga chiqarmaymiz.
+     */
+
+    mask(
+        value
+    ) {
+
+        if (
+            value === null ||
+            value === undefined
+        ) {
+
+            return '[EMPTY]';
+        }
+
+        const text =
+            String(value);
+
+        if (
+            text.length <= 8
+        ) {
+
+            return '********';
+        }
+
+        return (
+            text.slice(0, 4) +
+            '********' +
+            text.slice(-4)
+        );
+    }
+
+    getMasked(
+        name
+    ) {
+
+        return this.mask(
+            this.get(
+                name
+            )
+        );
+    }
+
+    /*
+     * Tasodifiy request/session token.
+     */
+
+    generateToken(
+        bytes = 32
+    ) {
+
+        return crypto
+            .randomBytes(
+                Number(bytes)
+            )
+            .toString(
+                'hex'
+            );
+    }
+
+    /*
+     * Muhim:
+     *
+     * Bu funksiya secretni Telegram,
+     * GitHub yoki chatga yubormaydi.
+     */
+
+    getStatus() {
+
+        const status = {};
+
+        for (
+            const name of Object.keys(
+                this.environmentMap
+            )
+        ) {
+
+            status[name] = {
+
+                configured:
+                    this.has(name),
+
+                value:
+                    this.getMasked(name)
+            };
+        }
+
+        return status;
+    }
+
+    validateRequired(
+        names = []
+    ) {
+
+        const missing = [];
+
+        for (
+            const name of names
+        ) {
+
+            if (
+                !this.has(name)
+            ) {
+
+                missing.push(
+                    name
+                );
+            }
+        }
+
+        if (
+            missing.length
+        ) {
+
+            logger.warn(
+                `Yetishmayotgan secretlar: ${missing.join(', ')}`
+            );
+        }
+
+        return {
+
+            valid:
+                missing.length === 0,
+
+            missing
+        };
+    }
+}
+
+const secretManager =
+    new SecretManager();
+
+module.exports =
+    secretManager;
+
+module.exports.SecretManager =
+    SecretManager;
