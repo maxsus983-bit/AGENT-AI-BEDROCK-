@@ -1,0 +1,417 @@
+'use strict';
+
+/*
+===============================================================
+ AKV AGENT STATE
+ Botning barcha joriy holatini markazlashtirib saqlaydi.
+===============================================================
+*/
+
+class AgentState {
+
+    constructor() {
+
+        this.startedAt = Date.now();
+
+        /* Minecraft */
+        this.connected = false;
+        this.authenticated = false;
+        this.spawned = false;
+        this.reconnecting = false;
+
+        this.position = {
+            x: 0,
+            y: 0,
+            z: 0
+        };
+
+        this.rotation = {
+            yaw: 0,
+            pitch: 0
+        };
+
+        this.dimension = 'overworld';
+
+        /* AI */
+        this.autonomous = false;
+        this.busy = false;
+        this.currentTask = null;
+        this.currentGoal = null;
+        this.lastDecision = null;
+
+        /* Observation */
+        this.observing = false;
+        this.hiddenObservation = false;
+        this.observationTarget = null;
+
+        /* Players / entities */
+        this.players = new Map();
+        this.entities = new Map();
+
+        /* Combat */
+        this.inCombat = false;
+        this.combatTarget = null;
+
+        /* External control */
+        this.remoteControl = true;
+        this.lastCommand = null;
+        this.commandSource = null;
+
+        /* Chat */
+        this.lastChat = null;
+        this.chatEnabled = true;
+
+        /* Statistics */
+        this.statistics = {
+            commands: 0,
+            decisions: 0,
+            actions: 0,
+            observations: 0,
+            chats: 0,
+            combats: 0,
+            reconnects: 0,
+            errors: 0
+        };
+    }
+
+    /* ========================================================
+       POSITION
+    ======================================================== */
+
+    setPosition(x, y, z) {
+
+        this.position = {
+            x: Number(x) || 0,
+            y: Number(y) || 0,
+            z: Number(z) || 0
+        };
+
+        return this.position;
+    }
+
+    setRotation(yaw, pitch) {
+
+        this.rotation = {
+            yaw: Number(yaw) || 0,
+            pitch: Number(pitch) || 0
+        };
+
+        return this.rotation;
+    }
+
+    /* ========================================================
+       TASK
+    ======================================================== */
+
+    setTask(task, goal = null) {
+
+        this.currentTask = task;
+        this.currentGoal = goal;
+        this.busy = Boolean(task);
+
+        return {
+            task,
+            goal
+        };
+    }
+
+    clearTask() {
+
+        this.currentTask = null;
+        this.currentGoal = null;
+        this.busy = false;
+    }
+
+    /* ========================================================
+       COMMAND
+    ======================================================== */
+
+    setCommand(command, source = 'unknown') {
+
+        this.lastCommand = command;
+        this.commandSource = source;
+        this.statistics.commands++;
+
+        return true;
+    }
+
+    /* ========================================================
+       PLAYER
+    ======================================================== */
+
+    updatePlayer(name, data = {}) {
+
+        if (!name) {
+            return;
+        }
+
+        const old =
+            this.players.get(name) || {};
+
+        this.players.set(
+            name,
+            {
+                ...old,
+                ...data,
+                name,
+                lastSeen: Date.now()
+            }
+        );
+    }
+
+    removePlayer(name) {
+
+        this.players.delete(name);
+    }
+
+    getPlayer(name) {
+
+        return this.players.get(name) || null;
+    }
+
+    getPlayers() {
+
+        return Array.from(
+            this.players.values()
+        );
+    }
+
+    /* ========================================================
+       ENTITY
+    ======================================================== */
+
+    updateEntity(id, data = {}) {
+
+        if (
+            id === undefined ||
+            id === null
+        ) {
+            return;
+        }
+
+        const key = String(id);
+
+        const old =
+            this.entities.get(key) || {};
+
+        this.entities.set(
+            key,
+            {
+                ...old,
+                ...data,
+                id: key,
+                lastSeen: Date.now()
+            }
+        );
+    }
+
+    removeEntity(id) {
+
+        this.entities.delete(
+            String(id)
+        );
+    }
+
+    getEntities() {
+
+        return Array.from(
+            this.entities.values()
+        );
+    }
+
+    /* ========================================================
+       OBSERVATION
+    ======================================================== */
+
+    startObservation(
+        target = null,
+        hidden = false
+    ) {
+
+        this.observing = true;
+        this.observationTarget = target;
+        this.hiddenObservation = hidden;
+
+        return true;
+    }
+
+    stopObservation() {
+
+        this.observing = false;
+        this.observationTarget = null;
+        this.hiddenObservation = false;
+    }
+
+    /* ========================================================
+       AUTONOMOUS MODE
+    ======================================================== */
+
+    setAutonomous(enabled) {
+
+        this.autonomous =
+            Boolean(enabled);
+
+        return this.autonomous;
+    }
+
+    /* ========================================================
+       COMBAT
+    ======================================================== */
+
+    startCombat(target) {
+
+        this.inCombat = true;
+        this.combatTarget = target;
+        this.statistics.combats++;
+
+    }
+
+    stopCombat() {
+
+        this.inCombat = false;
+        this.combatTarget = null;
+    }
+
+    /* ========================================================
+       CHAT
+    ======================================================== */
+
+    setLastChat(chat) {
+
+        this.lastChat = chat;
+        this.statistics.chats++;
+    }
+
+    /* ========================================================
+       DECISION
+    ======================================================== */
+
+    setDecision(decision) {
+
+        this.lastDecision = decision;
+        this.statistics.decisions++;
+    }
+
+    /* ========================================================
+       ACTION
+    ======================================================== */
+
+    actionStarted() {
+
+        this.statistics.actions++;
+        this.busy = true;
+    }
+
+    actionFinished() {
+
+        this.busy = false;
+    }
+
+    /* ========================================================
+       SNAPSHOT
+    ======================================================== */
+
+    snapshot() {
+
+        return {
+
+            uptime:
+                Date.now() -
+                this.startedAt,
+
+            connected:
+                this.connected,
+
+            authenticated:
+                this.authenticated,
+
+            spawned:
+                this.spawned,
+
+            reconnecting:
+                this.reconnecting,
+
+            position:
+                { ...this.position },
+
+            rotation:
+                { ...this.rotation },
+
+            dimension:
+                this.dimension,
+
+            autonomous:
+                this.autonomous,
+
+            busy:
+                this.busy,
+
+            currentTask:
+                this.currentTask,
+
+            currentGoal:
+                this.currentGoal,
+
+            lastDecision:
+                this.lastDecision,
+
+            observing:
+                this.observing,
+
+            hiddenObservation:
+                this.hiddenObservation,
+
+            observationTarget:
+                this.observationTarget,
+
+            players:
+                this.getPlayers(),
+
+            entities:
+                this.getEntities(),
+
+            inCombat:
+                this.inCombat,
+
+            combatTarget:
+                this.combatTarget,
+
+            remoteControl:
+                this.remoteControl,
+
+            lastCommand:
+                this.lastCommand,
+
+            commandSource:
+                this.commandSource,
+
+            lastChat:
+                this.lastChat,
+
+            statistics:
+                { ...this.statistics }
+        };
+    }
+
+    /* ========================================================
+       RESET TEMPORARY STATE
+    ======================================================== */
+
+    resetTemporary() {
+
+        this.busy = false;
+        this.currentTask = null;
+        this.currentGoal = null;
+        this.inCombat = false;
+        this.combatTarget = null;
+        this.lastDecision = null;
+    }
+}
+
+const state =
+    new AgentState();
+
+module.exports = state;
+
+module.exports.AgentState =
+    AgentState;
