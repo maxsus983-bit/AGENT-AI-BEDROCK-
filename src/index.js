@@ -69,7 +69,7 @@ const CONFIG = {
     minecraft: {
         host:
             process.env.MC_HOST ||
-            'add.aternos.org',
+            'Soloraft.aternos.me',
 
         port:
             Number(process.env.MC_PORT) ||
