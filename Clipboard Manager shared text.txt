@@ -1,0 +1,265 @@
+'use strict';
+
+const context = require('../core/agent-context');
+const brain = require('../ai/brain');
+const logger = require('../core/logger');
+
+class CommandRouter {
+
+    constructor() {
+
+        this.running = false;
+
+        this.history = [];
+
+        this.maxHistory = 1000;
+
+        this.sources = new Set([
+            'telegram',
+            'github',
+            'remote',
+            'api',
+            'minecraft',
+            'system'
+        ]);
+    }
+
+    start() {
+
+        if (this.running) {
+            return;
+        }
+
+        this.running = true;
+
+        context.eventBus.onSafe(
+            'command:received',
+            async data => {
+
+                await this.handle(
+                    data?.command,
+                    data?.source || 'remote',
+                    data?.user || null
+                );
+            }
+        );
+
+        logger.info(
+            'Command Router ishga tushdi.'
+        );
+    }
+
+    async handle(
+        command,
+        source = 'remote',
+        user = null
+    ) {
+
+        if (
+            typeof command !== 'string' ||
+            !command.trim()
+        ) {
+
+            return {
+                success: false,
+                error: 'Buyruq bo‘sh.'
+            };
+        }
+
+        const cleanCommand =
+            command
+                .trim()
+                .slice(0, 4000);
+
+        const record = {
+
+            id:
+                `${Date.now()}-${Math.random()
+                    .toString(36)
+                    .slice(2, 8)}`,
+
+            command:
+                cleanCommand,
+
+            source,
+
+            user,
+
+            timestamp:
+                new Date().toISOString()
+        };
+
+        this.history.push(record);
+
+        if (
+            this.history.length >
+            this.maxHistory
+        ) {
+
+            this.history.shift();
+        }
+
+        context.eventBus.emitSafe(
+            'command:started',
+            record
+        );
+
+        logger.info(
+            `Remote command: ${cleanCommand}`,
+            {
+                source
+            }
+        );
+
+        try {
+
+            const result =
+                await brain.handleCommand(
+                    cleanCommand,
+                    source
+                );
+
+            context.eventBus.emitSafe(
+                'command:completed',
+                {
+                    ...record,
+                    result
+                }
+            );
+
+            return result;
+
+        } catch (error) {
+
+            logger.error(
+                'Command Router xatosi.',
+                {
+                    error:
+                        error.message
+                }
+            );
+
+            context.eventBus.emitSafe(
+                'command:failed',
+                {
+                    ...record,
+
+                    error:
+                        error.message
+                }
+            );
+
+            return {
+
+                success: false,
+
+                error:
+                    error.message
+            };
+        }
+    }
+
+    receive(
+        command,
+        source,
+        user
+    ) {
+
+        return this.handle(
+            command,
+            source,
+            user
+        );
+    }
+
+    emitCommand(
+        command,
+        source = 'remote',
+        user = null
+    ) {
+
+        context.eventBus.emitSafe(
+            'command:received',
+            {
+                command,
+                source,
+                user
+            }
+        );
+
+        return true;
+    }
+
+    getHistory(
+        limit = 50
+    ) {
+
+        const count =
+            Math.max(
+                1,
+                Number(limit) || 50
+            );
+
+        return this.history.slice(
+            -count
+        );
+    }
+
+    getBySource(
+        source,
+        limit = 50
+    ) {
+
+        return this.history
+            .filter(
+                item =>
+                    item.source === source
+            )
+            .slice(
+                -Math.max(
+                    1,
+                    Number(limit) || 50
+                )
+            );
+    }
+
+    clearHistory() {
+
+        this.history.length = 0;
+
+        return true;
+    }
+
+    status() {
+
+        return {
+
+            running:
+                this.running,
+
+            commands:
+                this.history.length,
+
+            sources:
+                Array.from(
+                    this.sources
+                )
+        };
+    }
+
+    stop() {
+
+        this.running = false;
+
+        return true;
+    }
+}
+
+const router =
+    new CommandRouter();
+
+module.exports =
+    router;
+
+module.exports.CommandRouter =
+    CommandRouter;
