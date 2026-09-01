@@ -1,0 +1,922 @@
+'use strict';
+
+const context = require('../core/agent-context');
+const logger = require('../core/logger');
+
+class CommandExecutor {
+
+    constructor() {
+
+        this.running = false;
+
+        this.executed = [];
+
+        this.maxHistory = 5000;
+
+        context.register(
+            'command-executor',
+            this
+        );
+    }
+
+    start() {
+
+        this.running = true;
+
+        logger.info(
+            'Command Executor ishga tushdi.'
+        );
+
+        return {
+            success: true
+        };
+    }
+
+    stop() {
+
+        this.running = false;
+
+        return {
+            success: true
+        };
+    }
+
+    async execute(
+        command,
+        metadata = {}
+    ) {
+
+        if (!this.running) {
+
+            this.start();
+        }
+
+        if (
+            command === null ||
+            command === undefined
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Buyruq mavjud emas.'
+            };
+        }
+
+        const text =
+            String(command)
+                .trim();
+
+        if (!text) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Bo‘sh buyruq.'
+            };
+        }
+
+        /*
+         * Avval mavjud command-router orqali
+         * aniq buyruqlarni tekshiramiz.
+         */
+
+        const router =
+            context.get(
+                'command-router'
+            );
+
+        if (
+            router
+        ) {
+
+            try {
+
+                const routed =
+                    await this.route(
+                        router,
+                        text,
+                        metadata
+                    );
+
+                if (
+                    routed &&
+                    routed.handled
+                ) {
+
+                    return this.finish(
+                        text,
+                        routed.result,
+                        metadata
+                    );
+                }
+
+            } catch (error) {
+
+                logger.warn(
+                    `Command Router xatosi: ${error.message}`
+                );
+            }
+        }
+
+        /*
+         * Oddiy router tushunmasa,
+         * AI command interpreter ishlaydi.
+         */
+
+        const interpreter =
+            context.get(
+                'command-interpreter'
+            );
+
+        if (
+            !interpreter
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Command Interpreter topilmadi.'
+            };
+        }
+
+        try {
+
+            const result =
+                await interpreter
+                    .interpretAndExecute(
+                        text,
+                        metadata
+                    );
+
+            return this.finish(
+                text,
+                result,
+                metadata
+            );
+
+        } catch (error) {
+
+            logger.error(
+                `Command execution xatosi: ${error.message}`
+            );
+
+            return {
+
+                success: false,
+
+                error:
+                    error.message,
+
+                command:
+                    text
+            };
+        }
+    }
+
+    async route(
+        router,
+        text,
+        metadata
+    ) {
+
+        /*
+         * Turli command-router implementatsiyalarini
+         * qo‘llab-quvvatlash.
+         */
+
+        if (
+            typeof router.execute ===
+            'function'
+        ) {
+
+            const result =
+                await router.execute(
+                    text,
+                    metadata
+                );
+
+            return {
+
+                handled:
+                    Boolean(result),
+
+                result
+            };
+        }
+
+        if (
+            typeof router.route ===
+            'function'
+        ) {
+
+            const result =
+                await router.route(
+                    text,
+                    metadata
+                );
+
+            return {
+
+                handled:
+                    Boolean(
+                        result &&
+                        (
+                            result.handled ||
+                            result.success
+                        )
+                    ),
+
+                result
+            };
+        }
+
+        if (
+            typeof router.handle ===
+            'function'
+        ) {
+
+            const result =
+                await router.handle(
+                    text,
+                    metadata
+                );
+
+            return {
+
+                handled:
+                    Boolean(result),
+
+                result
+            };
+        }
+
+        return {
+            handled: false
+        };
+    }
+
+    async executeAction(
+        action,
+        parameters = {},
+        metadata = {}
+    ) {
+
+        if (
+            !action
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Action nomi berilmagan.'
+            };
+        }
+
+        const actionName =
+            String(
+                action
+            ).trim();
+
+        /*
+         * Asosiy registry.
+         */
+
+        const registry =
+            context.get(
+                'action-registry'
+            );
+
+        if (
+            registry &&
+            typeof registry.execute ===
+            'function'
+        ) {
+
+            return registry.execute(
+                actionName,
+                parameters,
+                metadata
+            );
+        }
+
+        /*
+         * Agar registry hali mavjud bo‘lmasa,
+         * action-engine fallback sifatida ishlatiladi.
+         */
+
+        const engine =
+            context.get(
+                'action-engine'
+            );
+
+        if (
+            engine
+        ) {
+
+            if (
+                typeof engine.execute ===
+                'function'
+            ) {
+
+                return engine.execute(
+                    actionName,
+                    parameters,
+                    metadata
+                );
+            }
+
+            if (
+                typeof engine.run ===
+                'function'
+            ) {
+
+                return engine.run(
+                    actionName,
+                    parameters,
+                    metadata
+                );
+            }
+        }
+
+        return {
+
+            success: false,
+
+            error:
+                `Action bajaruvchi topilmadi: ${actionName}`
+        };
+    }
+
+    async executeActions(
+        actions,
+        metadata = {}
+    ) {
+
+        if (
+            !Array.isArray(actions)
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'actions array bo‘lishi kerak.'
+            };
+        }
+
+        const results = [];
+
+        for (
+            const item of actions
+        ) {
+
+            if (
+                !item
+            ) {
+
+                continue;
+            }
+
+            const action =
+                item.action ||
+                item.name;
+
+            const parameters =
+                item.parameters ||
+                item.params ||
+                {};
+
+            try {
+
+                const result =
+                    await this.executeAction(
+                        action,
+                        parameters,
+                        metadata
+                    );
+
+                results.push({
+
+                    action,
+
+                    parameters,
+
+                    result
+                });
+
+                /*
+                 * Xatolikdan keyin keyingi actionlarni
+                 * ko‘r-ko‘rona bajarmaymiz.
+                 */
+
+                if (
+                    result &&
+                    result.success === false
+                ) {
+
+                    break;
+                }
+
+            } catch (error) {
+
+                results.push({
+
+                    action,
+
+                    parameters,
+
+                    result: {
+
+                        success: false,
+
+                        error:
+                            error.message
+                    }
+                });
+
+                break;
+            }
+        }
+
+        return {
+
+            success:
+                results.every(
+                    item =>
+                        item.result &&
+                        item.result.success !== false
+                ),
+
+            results
+        };
+    }
+
+    /*
+     * Tashqi kanal uchun yagona kirish nuqtasi.
+     *
+     * Telegram/GitHub/Webhook keyinchalik:
+     *
+     * executor.handleExternal(...)
+     *
+     * orqali buyruq yuborishi mumkin.
+     */
+
+    async handleExternal(
+        payload = {}
+    ) {
+
+        const command =
+            payload.command ||
+            payload.text ||
+            payload.message ||
+            payload.prompt;
+
+        const metadata = {
+
+            source:
+                payload.source ||
+                'external',
+
+            channel:
+                payload.channel ||
+                'unknown',
+
+            user:
+                payload.user ||
+                payload.username ||
+                payload.userId ||
+                null,
+
+            requestId:
+                payload.requestId ||
+                this.generateRequestId(),
+
+            timestamp:
+                Date.now(),
+
+            raw:
+                payload
+        };
+
+        return this.execute(
+            command,
+            metadata
+        );
+    }
+
+    /*
+     * Telegram/Web/API kabi kanallar natijani
+     * tushunarli formatda olishi uchun.
+     */
+
+    formatResponse(
+        result
+    ) {
+
+        if (!result) {
+
+            return {
+                text:
+                    '❌ Natija olinmadi.'
+            };
+        }
+
+        if (
+            result.success === false
+        ) {
+
+            return {
+
+                text:
+                    `❌ ${result.error || 'Buyruq bajarilmadi.'}`,
+
+                success:
+                    false,
+
+                data:
+                    result
+            };
+        }
+
+        let text =
+            '✅ Buyruq bajarildi.';
+
+        if (
+            result.interpretation &&
+            result.interpretation.response
+        ) {
+
+            text =
+                result
+                    .interpretation
+                    .response;
+        }
+
+        if (
+            result.results &&
+            Array.isArray(
+                result.results
+            )
+        ) {
+
+            const successful =
+                result.results.filter(
+                    item =>
+                        item &&
+                        (
+                            item.success !== false ||
+                            item.result?.success !== false
+                        )
+                ).length;
+
+            text +=
+                `\nBajarilgan amallar: ${successful}/${result.results.length}`;
+        }
+
+        return {
+
+            text,
+
+            success:
+                true,
+
+            data:
+                result
+        };
+    }
+
+    finish(
+        command,
+        result,
+        metadata
+    ) {
+
+        const record = {
+
+            id:
+                metadata.requestId ||
+                this.generateRequestId(),
+
+            timestamp:
+                Date.now(),
+
+            command,
+
+            source:
+                metadata.source ||
+                'unknown',
+
+            channel:
+                metadata.channel ||
+                'unknown',
+
+            user:
+                metadata.user ||
+                null,
+
+            result
+        };
+
+        this.executed.push(
+            record
+        );
+
+        if (
+            this.executed.length >
+            this.maxHistory
+        ) {
+
+            this.executed.splice(
+                0,
+                this.executed.length -
+                this.maxHistory
+            );
+        }
+
+        /*
+         * Event Bus orqali boshqa modullarga
+         * buyruq bajarilgani haqida signal beramiz.
+         */
+
+        context.eventBus.emitSafe(
+            'command:executed',
+            record
+        );
+
+        /*
+         * Memory mavjud bo‘lsa,
+         * tashqi buyruq tarixga yoziladi.
+         */
+
+        const memory =
+            context.get(
+                'memory'
+            );
+
+        if (
+            memory &&
+            typeof memory.addEvent ===
+            'function'
+        ) {
+
+            Promise.resolve(
+                memory.addEvent({
+
+                    type:
+                        'external_command',
+
+                    timestamp:
+                        record.timestamp,
+
+                    command,
+
+                    source:
+                        record.source,
+
+                    channel:
+                        record.channel,
+
+                    user:
+                        record.user,
+
+                    result
+                })
+            ).catch(
+                error => {
+
+                    logger.warn(
+                        `Buyruq xotiraga saqlanmadi: ${error.message}`
+                    );
+                }
+            );
+        }
+
+        return {
+
+            ...result,
+
+            requestId:
+                record.id,
+
+            command,
+
+            source:
+                record.source
+        };
+    }
+
+    async command(
+        text,
+        source = 'external',
+        user = null
+    ) {
+
+        return this.execute(
+            text,
+            {
+
+                source,
+
+                user,
+
+                channel:
+                    source
+            }
+        );
+    }
+
+    async move(
+        parameters = {},
+        metadata = {}
+    ) {
+
+        return this.executeAction(
+            'move',
+            parameters,
+            metadata
+        );
+    }
+
+    async fight(
+        parameters = {},
+        metadata = {}
+    ) {
+
+        return this.executeAction(
+            'fight',
+            parameters,
+            metadata
+        );
+    }
+
+    async build(
+        parameters = {},
+        metadata = {}
+    ) {
+
+        return this.executeAction(
+            'build',
+            parameters,
+            metadata
+        );
+    }
+
+    async watch(
+        parameters = {},
+        metadata = {}
+    ) {
+
+        return this.executeAction(
+            'watch',
+            parameters,
+            metadata
+        );
+    }
+
+    async chat(
+        parameters = {},
+        metadata = {}
+    ) {
+
+        return this.executeAction(
+            'chat',
+            parameters,
+            metadata
+        );
+    }
+
+    async scan(
+        parameters = {},
+        metadata = {}
+    ) {
+
+        return this.executeAction(
+            'scan',
+            parameters,
+            metadata
+        );
+    }
+
+    async autonomous(
+        parameters = {},
+        metadata = {}
+    ) {
+
+        const agent =
+            context.get(
+                'autonomous-agent'
+            );
+
+        if (
+            !agent
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Autonomous Agent topilmadi.'
+            };
+        }
+
+        return agent.enable(
+            parameters
+        );
+    }
+
+    async stopAutonomous() {
+
+        const agent =
+            context.get(
+                'autonomous-agent'
+            );
+
+        if (
+            !agent
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Autonomous Agent topilmadi.'
+            };
+        }
+
+        return agent.disable();
+    }
+
+    getHistory(
+        limit = 50
+    ) {
+
+        const amount =
+            Math.max(
+                1,
+                Number(limit) || 50
+            );
+
+        return this.executed.slice(
+            -amount
+        );
+    }
+
+    clearHistory() {
+
+        this.executed = [];
+
+        return {
+
+            success: true
+        };
+    }
+
+    status() {
+
+        return {
+
+            running:
+                this.running,
+
+            history:
+                this.executed.length,
+
+            maxHistory:
+                this.maxHistory
+        };
+    }
+
+    generateRequestId() {
+
+        return (
+            'req-' +
+            Date.now()
+                .toString(36) +
+            '-' +
+            Math.random()
+                .toString(36)
+                .slice(2, 10)
+        );
+    }
+}
+
+const executor =
+    new CommandExecutor();
+
+module.exports =
+    executor;
+
+module.exports.CommandExecutor =
+    CommandExecutor;
