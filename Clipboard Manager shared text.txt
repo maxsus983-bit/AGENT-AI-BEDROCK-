@@ -1,0 +1,728 @@
+'use strict';
+
+const context = require('../core/agent-context');
+const logger = require('../core/logger');
+
+class TelegramGateway {
+
+    constructor(options = {}) {
+        this.name = 'telegram-gateway';
+        this.running = false;
+        this.bot = null;
+
+        this.token =
+            options.token ||
+            process.env.TELEGRAM_BOT_TOKEN ||
+            '';
+
+        this.allowedUsers = new Set(
+            (options.allowedUsers || [])
+                .map(String)
+                .map(v => v.trim())
+                .filter(Boolean)
+        );
+
+        this.chatIds = new Set();
+
+        context.register(
+            'telegram-gateway',
+            this
+        );
+    }
+
+    async start() {
+
+        if (this.running) {
+            return {
+                success: true,
+                alreadyRunning: true
+            };
+        }
+
+        if (!this.token) {
+            logger.warn(
+                'Telegram token berilmagan. Telegram Gateway kutish holatida.'
+            );
+
+            return {
+                success: false,
+                disabled: true,
+                error: 'TELEGRAM_BOT_TOKEN topilmadi.'
+            };
+        }
+
+        let TelegramBot;
+
+        try {
+            TelegramBot =
+                require('node-telegram-bot-api');
+        } catch (error) {
+            logger.error(
+                'node-telegram-bot-api o‘rnatilmagan.'
+            );
+
+            return {
+                success: false,
+                error:
+                    'node-telegram-bot-api o‘rnatilmagan.'
+            };
+        }
+
+        try {
+
+            this.bot =
+                new TelegramBot(
+                    this.token,
+                    {
+                        polling: true
+                    }
+                );
+
+            this.registerHandlers();
+
+            this.running = true;
+
+            logger.info(
+                'Telegram Gateway ishga tushdi.'
+            );
+
+            return {
+                success: true
+            };
+
+        } catch (error) {
+
+            logger.error(
+                `Telegram Gateway xatosi: ${error.message}`
+            );
+
+            return {
+                success: false,
+                error: error.message
+            };
+        }
+    }
+
+    async stop() {
+
+        if (
+            this.bot &&
+            typeof this.bot.stopPolling === 'function'
+        ) {
+
+            try {
+                await this.bot.stopPolling();
+            } catch (error) {
+                logger.warn(
+                    `Telegram polling to‘xtatishda xato: ${error.message}`
+                );
+            }
+        }
+
+        this.running = false;
+        this.bot = null;
+
+        return {
+            success: true
+        };
+    }
+
+    registerHandlers() {
+
+        if (!this.bot) {
+            return;
+        }
+
+        /*
+         * Oddiy Telegram xabarlari.
+         */
+
+        this.bot.on(
+            'message',
+            async message => {
+
+                try {
+
+                    await this.handleMessage(
+                        message
+                    );
+
+                } catch (error) {
+
+                    logger.error(
+                        `Telegram message xatosi: ${error.message}`
+                    );
+
+                    await this.safeSend(
+                        message.chat.id,
+                        `❌ Xatolik: ${error.message}`
+                    );
+                }
+            }
+        );
+
+        /*
+         * /start
+         */
+
+        this.bot.onText(
+            /^\/start(?:\s+(.+))?$/i,
+            async message => {
+
+                await this.safeSend(
+                    message.chat.id,
+                    [
+                        '🤖 Minecraft AI Agent ishga tayyor.',
+                        '',
+                        'Men Telegram orqali tashqaridan boshqarilaman.',
+                        '',
+                        'Misollar:',
+                        '• Oldinga 10 blok yur',
+                        '• PLAYER ni kuzat',
+                        '• Jang qil',
+                        '• Uy qur',
+                        '• Chatga Salom yoz',
+                        '• Atrofni ayt',
+                        '• Avto o‘yna',
+                        '• To‘xta'
+                    ].join('\n')
+                );
+            }
+        );
+
+        /*
+         * /status
+         */
+
+        this.bot.onText(
+            /^\/status$/i,
+            async message => {
+
+                const gateway =
+                    context.get(
+                        'command-gateway'
+                    );
+
+                if (
+                    !gateway ||
+                    typeof gateway.status !==
+                    'function'
+                ) {
+
+                    await this.safeSend(
+                        message.chat.id,
+                        '⚠️ Command Gateway topilmadi.'
+                    );
+
+                    return;
+                }
+
+                const status =
+                    gateway.status();
+
+                await this.safeSend(
+                    message.chat.id,
+                    this.formatStatus(
+                        status
+                    )
+                );
+            }
+        );
+
+        /*
+         * /help
+         */
+
+        this.bot.onText(
+            /^\/help$/i,
+            async message => {
+
+                const gateway =
+                    context.get(
+                        'command-gateway'
+                    );
+
+                if (
+                    gateway &&
+                    typeof gateway.getHelp ===
+                    'function'
+                ) {
+
+                    const help =
+                        gateway.getHelp();
+
+                    await this.safeSend(
+                        message.chat.id,
+                        help.examples
+                            .map(
+                                item =>
+                                    `• ${item}`
+                            )
+                            .join('\n')
+                    );
+
+                    return;
+                }
+
+                await this.safeSend(
+                    message.chat.id,
+                    'Buyruq: oldinga yur, jang qil, kuzat, qur, chatga yoz, avto o‘yna, to‘xta.'
+                );
+            }
+        );
+
+        /*
+         * /cancel REQUEST_ID
+         */
+
+        this.bot.onText(
+            /^\/cancel(?:\s+(.+))?$/i,
+            async message => {
+
+                const target =
+                    message.text
+                        ?.match(
+                            /^\/cancel(?:\s+(.+))?$/i
+                        )?.[1];
+
+                const gateway =
+                    context.get(
+                        'command-gateway'
+                    );
+
+                if (
+                    !gateway
+                ) {
+
+                    return;
+                }
+
+                const result =
+                    gateway.cancel(
+                        target
+                    );
+
+                await this.safeSend(
+                    message.chat.id,
+                    result.success
+                        ? `✅ Buyruq bekor qilindi: ${target}`
+                        : `❌ ${result.error || 'Buyruq topilmadi.'}`
+                );
+            }
+        );
+    }
+
+    async handleMessage(
+        message
+    ) {
+
+        if (
+            !message ||
+            !message.chat
+        ) {
+            return;
+        }
+
+        const chatId =
+            String(
+                message.chat.id
+            );
+
+        this.chatIds.add(
+            chatId
+        );
+
+        /*
+         * Botning o‘z xabarlarini qayta buyruq sifatida
+         * qabul qilmaslik.
+         */
+
+        if (
+            message.from &&
+            message.from.is_bot
+        ) {
+            return;
+        }
+
+        const text =
+            message.text ||
+            message.caption ||
+            '';
+
+        if (!text.trim()) {
+            return;
+        }
+
+        /*
+         * /start, /help va boshqa commandlarni
+         * yuqoridagi handlerlar bajaradi.
+         */
+
+        if (
+            text.startsWith('/')
+        ) {
+            return;
+        }
+
+        /*
+         * Admin tekshiruvi.
+         */
+
+        if (
+            !this.isAllowedUser(
+                message.from
+            )
+        ) {
+
+            await this.safeSend(
+                chatId,
+                '⛔ Sizga Minecraft AI Agentni boshqarish ruxsati berilmagan.'
+            );
+
+            return;
+        }
+
+        const gateway =
+            context.get(
+                'command-gateway'
+            );
+
+        if (
+            !gateway ||
+            typeof gateway.receive !==
+            'function'
+        ) {
+
+            await this.safeSend(
+                chatId,
+                '❌ Command Gateway ishlamayapti.'
+            );
+
+            return;
+        }
+
+        const result =
+            await gateway.receive(
+                {
+                    text,
+
+                    source:
+                        'telegram',
+
+                    channel:
+                        'telegram',
+
+                    user:
+                        {
+                            id:
+                                message.from?.id,
+
+                            username:
+                                message.from?.username,
+
+                            name:
+                                [
+                                    message.from?.first_name,
+                                    message.from?.last_name
+                                ]
+                                .filter(Boolean)
+                                .join(' ')
+                        },
+
+                    metadata:
+                        {
+                            chatId,
+
+                            messageId:
+                                message.message_id
+                        }
+                }
+            );
+
+        if (
+            result.success
+        ) {
+
+            await this.safeSend(
+                chatId,
+                [
+                    '✅ Buyruq qabul qilindi.',
+                    `🆔 ${result.requestId}`,
+                    `⚙️ ${this.commandName(result.command)}`
+                ].join('\n')
+            );
+
+        } else {
+
+            await this.safeSend(
+                chatId,
+                `❌ ${result.error || 'Buyruq qabul qilinmadi.'}`
+            );
+        }
+    }
+
+    isAllowedUser(
+        user
+    ) {
+
+        /*
+         * allowedUsers bo‘sh bo‘lsa,
+         * Permission Manager asosiy himoya bo‘ladi.
+         */
+
+        if (
+            this.allowedUsers.size === 0
+        ) {
+            return true;
+        }
+
+        const values = [
+
+            user?.id,
+
+            user?.username,
+
+            user?.first_name
+
+        ]
+        .filter(
+            Boolean
+        )
+        .map(
+            String
+        );
+
+        return values.some(
+            value =>
+                this.allowedUsers.has(
+                    value
+                )
+        );
+    }
+
+    async send(
+        message
+    ) {
+
+        if (
+            !this.bot
+        ) {
+
+            return {
+                success: false,
+                error:
+                    'Telegram bot ishlamayapti.'
+            };
+        }
+
+        const targets =
+            message.chatId
+                ? [String(message.chatId)]
+                : [...this.chatIds];
+
+        if (
+            targets.length === 0
+        ) {
+
+            return {
+                success: false,
+                error:
+                    'Telegram chat ID topilmadi.'
+            };
+        }
+
+        const results = [];
+
+        for (
+            const chatId of targets
+        ) {
+
+            results.push(
+                await this.safeSend(
+                    chatId,
+                    String(
+                        message.text ||
+                        message.message ||
+                        ''
+                    )
+                )
+            );
+        }
+
+        return {
+            success: true,
+            results
+        };
+    }
+
+    async notify(
+        text
+    ) {
+
+        return this.send(
+            {
+                text
+            }
+        );
+    }
+
+    async safeSend(
+        chatId,
+        text
+    ) {
+
+        if (
+            !this.bot
+        ) {
+            return {
+                success: false
+            };
+        }
+
+        try {
+
+            /*
+             * Telegram xabar chegarasiga yaqinlashganda
+             * katta xabarni bo‘lib yuboramiz.
+             */
+
+            const chunks =
+                this.splitMessage(
+                    String(text || '')
+                );
+
+            const results = [];
+
+            for (
+                const chunk of chunks
+            ) {
+
+                const result =
+                    await this.bot.sendMessage(
+                        chatId,
+                        chunk,
+                        {
+                            disable_web_page_preview:
+                                true
+                        }
+                    );
+
+                results.push(
+                    result
+                );
+            }
+
+            return {
+                success: true,
+                results
+            };
+
+        } catch (error) {
+
+            logger.warn(
+                `Telegram xabar yuborilmadi: ${error.message}`
+            );
+
+            return {
+                success: false,
+                error:
+                    error.message
+            };
+        }
+    }
+
+    splitMessage(
+        text
+    ) {
+
+        const limit =
+            3900;
+
+        if (
+            text.length <= limit
+        ) {
+            return [text];
+        }
+
+        const chunks = [];
+
+        for (
+            let i = 0;
+            i < text.length;
+            i += limit
+        ) {
+
+            chunks.push(
+                text.slice(
+                    i,
+                    i + limit
+                )
+            );
+        }
+
+        return chunks;
+    }
+
+    commandName(
+        command
+    ) {
+
+        if (!command) {
+            return 'unknown';
+        }
+
+        return String(
+            command.type ||
+            'ai'
+        );
+    }
+
+    formatStatus(
+        status
+    ) {
+
+        return [
+            '🤖 AI Agent holati',
+            '',
+            `🟢 Running: ${status.running}`,
+            `⚙️ Processing: ${status.processing}`,
+            `📥 Queue: ${status.queue}`,
+            `⏳ Pending: ${status.pending}`,
+            `📚 History: ${status.history}`,
+            '',
+            `📨 Received: ${status.stats?.received || 0}`,
+            `✅ Accepted: ${status.stats?.accepted || 0}`,
+            `❌ Rejected: ${status.stats?.rejected || 0}`,
+            `🏁 Executed: ${status.stats?.executed || 0}`,
+            `💥 Failed: ${status.stats?.failed || 0}`
+        ].join('\n');
+    }
+
+    getStatus() {
+
+        return {
+            running:
+                this.running,
+
+            connected:
+                Boolean(
+                    this.bot
+                ),
+
+            chats:
+                this.chatIds.size,
+
+            allowedUsers:
+                this.allowedUsers.size
+        };
+    }
+}
+
+const telegramGateway =
+    new TelegramGateway();
+
+module.exports =
+    telegramGateway;
+
+module.exports.TelegramGateway =
+    TelegramGateway;
