@@ -1,0 +1,1556 @@
+'use strict';
+
+/*
+===============================================================
+ AKV BEDROCK CLIENT
+ Minecraft Bedrock 1.26.30
+===============================================================
+*/
+
+const bedrock = require('bedrock-protocol');
+
+let context = null;
+let client = null;
+
+let reconnectTimer = null;
+let reconnectAttempts = 0;
+
+let intentionallyDisconnected = false;
+
+let connected = false;
+let spawned = false;
+let authenticated = false;
+
+let lastConnectStartedAt = 0;
+let lastDisconnectAt = 0;
+
+/* ============================================================
+   LOG
+============================================================ */
+
+function logger() {
+
+    if (
+        context &&
+        context.logger
+    ) {
+        return context.logger;
+    }
+
+    return console;
+}
+
+/* ============================================================
+   EVENT
+============================================================ */
+
+function emit(
+    event,
+    payload = {}
+) {
+
+    if (
+        !context ||
+        !context.eventBus
+    ) {
+        return;
+    }
+
+    try {
+
+        if (
+            typeof context.eventBus.emitSafe ===
+            'function'
+        ) {
+
+            context.eventBus.emitSafe(
+                event,
+                payload
+            );
+
+            return;
+        }
+
+        if (
+            typeof context.eventBus.emit ===
+            'function'
+        ) {
+
+            context.eventBus.emit(
+                event,
+                payload
+            );
+        }
+
+    } catch (error) {
+
+        logger().warn?.(
+            `Event yuborishda xato: ${error.message}`
+        );
+    }
+}
+
+/* ============================================================
+   WAIT
+============================================================ */
+
+function wait(ms) {
+
+    return new Promise(
+        resolve => {
+            setTimeout(
+                resolve,
+                ms
+            );
+        }
+    );
+}
+
+/* ============================================================
+   RECONNECT TIMER
+============================================================ */
+
+function clearReconnectTimer() {
+
+    if (
+        reconnectTimer
+    ) {
+
+        clearTimeout(
+            reconnectTimer
+        );
+
+        reconnectTimer = null;
+    }
+}
+
+/* ============================================================
+   PACKET NAME
+============================================================ */
+
+function packetName(
+    packet
+) {
+
+    if (
+        !packet
+    ) {
+        return '';
+    }
+
+    return String(
+        packet.name ||
+        packet.id ||
+        ''
+    );
+}
+
+/* ============================================================
+   POSITION
+============================================================ */
+
+function extractPosition(
+    packet
+) {
+
+    if (
+        !packet
+    ) {
+        return null;
+    }
+
+    const position =
+        packet.position ||
+        packet.pos ||
+        packet.player_position ||
+        null;
+
+    if (
+        !position
+    ) {
+        return null;
+    }
+
+    const x =
+        Number(position.x);
+
+    const y =
+        Number(position.y);
+
+    const z =
+        Number(position.z);
+
+    if (
+        !Number.isFinite(x) ||
+        !Number.isFinite(y) ||
+        !Number.isFinite(z)
+    ) {
+
+        return null;
+    }
+
+    return {
+        x,
+        y,
+        z
+    };
+}
+
+/* ============================================================
+   ROTATION
+============================================================ */
+
+function extractRotation(
+    packet
+) {
+
+    if (
+        !packet
+    ) {
+        return null;
+    }
+
+    const yaw =
+        packet.yaw ??
+        packet.rotation?.yaw ??
+        packet.yRot ??
+        packet.y_rotation;
+
+    const pitch =
+        packet.pitch ??
+        packet.rotation?.pitch ??
+        packet.xRot ??
+        packet.x_rotation;
+
+    if (
+        yaw === undefined &&
+        pitch === undefined
+    ) {
+        return null;
+    }
+
+    return {
+
+        yaw:
+            Number(yaw ?? 0),
+
+        pitch:
+            Number(pitch ?? 0)
+    };
+}
+
+/* ============================================================
+   STATE POSITION UPDATE
+============================================================ */
+
+function updatePositionFromPacket(
+    packet
+) {
+
+    if (
+        !context ||
+        !context.state
+    ) {
+        return;
+    }
+
+    const position =
+        extractPosition(
+            packet
+        );
+
+    if (
+        position
+    ) {
+
+        context.state.position =
+            position;
+
+        emit(
+            'minecraft:position',
+            {
+                position,
+
+                packet:
+                    packetName(
+                        packet
+                    )
+            }
+        );
+    }
+
+    const rotation =
+        extractRotation(
+            packet
+        );
+
+    if (
+        rotation
+    ) {
+
+        context.state.rotation =
+            rotation;
+
+        emit(
+            'minecraft:rotation',
+            {
+                rotation,
+
+                packet:
+                    packetName(
+                        packet
+                    )
+            }
+        );
+    }
+}
+
+/* ============================================================
+   CHAT EXTRACTION
+============================================================ */
+
+function extractChat(
+    packet
+) {
+
+    if (
+        !packet
+    ) {
+        return null;
+    }
+
+    const message =
+        packet.message ??
+        packet.text ??
+        packet.rawtext ??
+        packet.content ??
+        null;
+
+    if (
+        message === null ||
+        message === undefined
+    ) {
+        return null;
+    }
+
+    let text;
+
+    if (
+        typeof message ===
+        'string'
+    ) {
+
+        text =
+            message;
+
+    } else {
+
+        try {
+
+            text =
+                JSON.stringify(
+                    message
+                );
+
+        } catch {
+
+            text =
+                String(
+                    message
+                );
+        }
+    }
+
+    let username =
+        packet.username ??
+        packet.sender ??
+        packet.source_name ??
+        packet.name ??
+        null;
+
+    if (
+        username !== null &&
+        typeof username !==
+        'string'
+    ) {
+
+        username =
+            String(
+                username
+            );
+    }
+
+    return {
+
+        username,
+
+        message:
+            text,
+
+        timestamp:
+            Date.now(),
+
+        packet:
+            packetName(
+                packet
+            )
+    };
+}
+
+/* ============================================================
+   PACKET HANDLER
+============================================================ */
+
+function handlePacket(
+    packet
+) {
+
+    if (
+        !packet
+    ) {
+        return;
+    }
+
+    const name =
+        packetName(
+            packet
+        );
+
+    emit(
+        'minecraft:packet',
+        {
+            name,
+            packet
+        }
+    );
+
+    const positionPackets =
+        new Set([
+            'move_player',
+            'player_auth_input',
+            'player_action',
+            'respawn',
+            'start_game'
+        ]);
+
+    if (
+        positionPackets.has(
+            name
+        )
+    ) {
+
+        updatePositionFromPacket(
+            packet
+        );
+    }
+
+    const chatPackets =
+        new Set([
+            'text',
+            'chat',
+            'system_chat'
+        ]);
+
+    if (
+        chatPackets.has(
+            name
+        )
+    ) {
+
+        const chat =
+            extractChat(
+                packet
+            );
+
+        if (
+            chat
+        ) {
+
+            emit(
+                'minecraft:chat',
+                chat
+            );
+        }
+    }
+
+    if (
+        name ===
+        'start_game'
+    ) {
+
+        spawned = true;
+
+        if (
+            context &&
+            context.state
+        ) {
+
+            context.state.spawned =
+                true;
+        }
+
+        emit(
+            'minecraft:spawned',
+            {
+                packet:
+                    name
+            }
+        );
+
+        logger().success?.(
+            'Minecraft bot spawn holatiga yetdi.'
+        );
+    }
+
+    const observationPackets =
+        new Set([
+            'add_player',
+            'add_entity',
+            'add_item_entity',
+            'remove_entity',
+            'move_entity',
+            'move_player',
+            'set_entity_data',
+            'update_attributes',
+            'inventory_content',
+            'mob_equipment',
+            'take_item_entity',
+            'animate',
+            'entity_event',
+            'interact'
+        ]);
+
+    if (
+        observationPackets.has(
+            name
+        )
+    ) {
+
+        emit(
+            'minecraft:observation_packet',
+            {
+                name,
+                packet
+            }
+        );
+    }
+
+    const combatPackets =
+        new Set([
+            'animate',
+            'entity_event',
+            'damage_event',
+            'hurt_animation',
+            'mob_effect'
+        ]);
+
+    if (
+        combatPackets.has(
+            name
+        )
+    ) {
+
+        emit(
+            'minecraft:combat_packet',
+            {
+                name,
+                packet
+            }
+        );
+    }
+
+    const worldPackets =
+        new Set([
+            'block_update',
+            'update_block',
+            'update_sub_chunk_blocks',
+            'level_chunk',
+            'network_chunk_publisher_update',
+            'sub_chunk'
+        ]);
+
+    if (
+        worldPackets.has(
+            name
+        )
+    ) {
+
+        emit(
+            'minecraft:world_packet',
+            {
+                name,
+                packet
+            }
+        );
+    }
+}
+
+/* ============================================================
+   CLIENT EVENT HANDLERS
+============================================================ */
+
+function installClientHandlers() {
+
+    if (
+        !client
+    ) {
+        return;
+    }
+
+    client.on(
+        'packet',
+        handlePacket
+    );
+
+    client.on(
+        'connect',
+        () => {
+
+            connected = true;
+            spawned = false;
+            authenticated = false;
+
+            reconnectAttempts = 0;
+
+            if (
+                context &&
+                context.state
+            ) {
+
+                context.state.connected =
+                    true;
+
+                context.state.spawned =
+                    false;
+
+                context.state.authenticated =
+                    false;
+
+                context.state.reconnecting =
+                    false;
+            }
+
+            logger().success?.(
+                'Minecraft serverga ulanish o‘rnatildi.'
+            );
+
+            emit(
+                'minecraft:connected',
+                {
+                    host:
+                        context?.config?.minecraft?.host,
+
+                    port:
+                        context?.config?.minecraft?.port,
+
+                    timestamp:
+                        Date.now()
+                }
+            );
+        }
+    );
+
+    client.on(
+        'login',
+        packet => {
+
+            authenticated = true;
+
+            if (
+                context &&
+                context.state
+            ) {
+
+                context.state.authenticated =
+                    true;
+            }
+
+            emit(
+                'minecraft:login',
+                {
+                    packet
+                }
+            );
+
+            logger().success?.(
+                'Minecraft login muvaffaqiyatli.'
+            );
+        }
+    );
+
+    client.on(
+        'spawn',
+        packet => {
+
+            spawned = true;
+
+            if (
+                context &&
+                context.state
+            ) {
+
+                context.state.spawned =
+                    true;
+            }
+
+            emit(
+                'minecraft:spawned',
+                {
+                    packet
+                }
+            );
+
+            logger().success?.(
+                'Bot Minecraft dunyosiga spawn bo‘ldi.'
+            );
+        }
+    );
+
+    client.on(
+        'disconnect',
+        reason => {
+
+            connected = false;
+            spawned = false;
+            authenticated = false;
+
+            lastDisconnectAt =
+                Date.now();
+
+            if (
+                context &&
+                context.state
+            ) {
+
+                context.state.connected =
+                    false;
+
+                context.state.spawned =
+                    false;
+
+                context.state.authenticated =
+                    false;
+            }
+
+            let reasonText;
+
+            try {
+
+                reasonText =
+                    typeof reason ===
+                    'string'
+                        ? reason
+                        : JSON.stringify(
+                            reason
+                        );
+
+            } catch {
+
+                reasonText =
+                    String(
+                        reason
+                    );
+            }
+
+            const information = {
+
+                reason:
+                    reasonText,
+
+                timestamp:
+                    Date.now()
+            };
+
+            logger().warn?.(
+                `Minecraft connection uzildi: ${reasonText}`
+            );
+
+            emit(
+                'minecraft:disconnected',
+                information
+            );
+
+            if (
+                !intentionallyDisconnected &&
+                context?.config?.minecraft?.autoReconnect
+            ) {
+
+                scheduleReconnect();
+            }
+        }
+    );
+
+    client.on(
+        'error',
+        error => {
+
+            const message =
+                error?.message ||
+                String(
+                    error
+                );
+
+            const stack =
+                error?.stack ||
+                '';
+
+            logger().error?.(
+                `Minecraft client error: ${message}`
+            );
+
+            if (
+                stack
+            ) {
+
+                logger().error?.(
+                    stack
+                );
+            }
+
+            emit(
+                'minecraft:error',
+                {
+                    message,
+                    stack,
+                    error
+                }
+            );
+        }
+    );
+
+    client.on(
+        'close',
+        () => {
+
+            connected = false;
+
+            emit(
+                'minecraft:close',
+                {
+                    timestamp:
+                        Date.now()
+                }
+            );
+
+            if (
+                !intentionallyDisconnected &&
+                context?.config?.minecraft?.autoReconnect
+            ) {
+
+                scheduleReconnect();
+            }
+        }
+    );
+}
+
+/* ============================================================
+   CREATE CLIENT
+============================================================ */
+
+function createClient() {
+
+    if (
+        !context
+    ) {
+
+        throw new Error(
+            'Minecraft client context hali initialize qilinmagan.'
+        );
+    }
+
+    const mc =
+        context.config.minecraft;
+
+    if (
+        !mc
+    ) {
+
+        throw new Error(
+            'Minecraft konfiguratsiyasi topilmadi.'
+        );
+    }
+
+    if (
+        !mc.host
+    ) {
+
+        throw new Error(
+            'MC_HOST topilmadi.'
+        );
+    }
+
+    if (
+        !mc.port
+    ) {
+
+        throw new Error(
+            'MC_PORT topilmadi.'
+        );
+    }
+
+    intentionallyDisconnected =
+        false;
+
+    lastConnectStartedAt =
+        Date.now();
+
+    logger().info(
+        `Minecraft serverga ulanmoqda: ${mc.host}:${mc.port}`
+    );
+
+    const options = {
+
+        host:
+            String(
+                mc.host
+            ),
+
+        port:
+            Number(
+                mc.port
+            ),
+
+        version:
+            mc.version ||
+            '1.26.30',
+
+        username:
+            mc.username ||
+            'AKV_AI',
+
+        offline:
+            mc.offline !== false
+    };
+
+    logger().info(
+        `Bedrock options: host=${options.host}, port=${options.port}, version=${options.version}, username=${options.username}, offline=${options.offline}`
+    );
+
+    try {
+
+        client =
+            bedrock.createClient(
+                options
+            );
+
+    } catch (
+        error
+    ) {
+
+        client = null;
+
+        logger().error?.(
+            `Bedrock client yaratilmadi: ${error.message}`
+        );
+
+        if (
+            error.stack
+        ) {
+
+            logger().error?.(
+                error.stack
+            );
+        }
+
+        throw error;
+    }
+
+    installClientHandlers();
+
+    emit(
+        'minecraft:client_created',
+        {
+            host:
+                options.host,
+
+            port:
+                options.port,
+
+            version:
+                options.version
+        }
+    );
+
+    return client;
+}
+
+/* ============================================================
+   CONNECT
+============================================================ */
+
+async function connect(
+    agentContext = null
+) {
+
+    if (
+        agentContext
+    ) {
+
+        context =
+            agentContext;
+    }
+
+    if (
+        !context
+    ) {
+
+        throw new Error(
+            'Agent context berilmagan.'
+        );
+    }
+
+    intentionallyDisconnected =
+        false;
+
+    clearReconnectTimer();
+
+    if (
+        client &&
+        connected
+    ) {
+
+        logger().info?.(
+            'Minecraft client allaqachon ulangan.'
+        );
+
+        return client;
+    }
+
+    client = null;
+
+    const created =
+        createClient();
+
+    await wait(
+        100
+    );
+
+    return created;
+}
+
+/* ============================================================
+   RECONNECT
+============================================================ */
+
+function scheduleReconnect() {
+
+    if (
+        intentionallyDisconnected
+    ) {
+        return;
+    }
+
+    if (
+        !context
+    ) {
+        return;
+    }
+
+    if (
+        reconnectTimer
+    ) {
+        return;
+    }
+
+    reconnectAttempts++;
+
+    const base =
+        Number(
+            context.config?.minecraft?.reconnectDelay ||
+            10000
+        );
+
+    const delay =
+        Math.min(
+            base *
+            Math.pow(
+                2,
+                Math.min(
+                    reconnectAttempts - 1,
+                    5
+                )
+            ),
+            300000
+        );
+
+    if (
+        context.state
+    ) {
+
+        context.state.reconnecting =
+            true;
+
+        if (
+            context.state.statistics &&
+            typeof context.state.statistics.reconnects ===
+            'number'
+        ) {
+
+            context.state.statistics.reconnects++;
+        }
+    }
+
+    logger().warn?.(
+        `Minecraft reconnect rejalashtirildi: ${delay}ms, attempt=${reconnectAttempts}`
+    );
+
+    emit(
+        'minecraft:reconnect_scheduled',
+        {
+            delay,
+            attempt:
+                reconnectAttempts
+        }
+    );
+
+    reconnectTimer =
+        setTimeout(
+            async () => {
+
+                reconnectTimer =
+                    null;
+
+                if (
+                    intentionallyDisconnected
+                ) {
+                    return;
+                }
+
+                logger().info?.(
+                    `Minecraft reconnect urinishi #${reconnectAttempts}`
+                );
+
+                try {
+
+                    await connect();
+
+                } catch (
+                    error
+                ) {
+
+                    logger().error?.(
+                        `Reconnect muvaffaqiyatsiz: ${error.message}`
+                    );
+
+                    scheduleReconnect();
+                }
+
+            },
+            delay
+        );
+}
+
+/* ============================================================
+   DISCONNECT
+============================================================ */
+
+async function disconnect() {
+
+    intentionallyDisconnected =
+        true;
+
+    clearReconnectTimer();
+
+    connected = false;
+    spawned = false;
+    authenticated = false;
+
+    if (
+        context &&
+        context.state
+    ) {
+
+        context.state.connected =
+            false;
+
+        context.state.spawned =
+            false;
+
+        context.state.authenticated =
+            false;
+
+        context.state.reconnecting =
+            false;
+    }
+
+    if (
+        !client
+    ) {
+        return;
+    }
+
+    const oldClient =
+        client;
+
+    client = null;
+
+    try {
+
+        if (
+            typeof oldClient.disconnect ===
+            'function'
+        ) {
+
+            oldClient.disconnect(
+                'AKV agent shutdown'
+            );
+
+        } else if (
+            typeof oldClient.close ===
+            'function'
+        ) {
+
+            oldClient.close();
+        }
+
+    } catch (
+        error
+    ) {
+
+        logger().error?.(
+            `Minecraft disconnect error: ${error.message}`
+        );
+    }
+
+    emit(
+        'minecraft:disconnected_intentionally',
+        {
+            timestamp:
+                Date.now()
+        }
+    );
+}
+
+/* ============================================================
+   SEND PACKET
+============================================================ */
+
+function sendPacket(
+    name,
+    params = {}
+) {
+
+    if (
+        !client
+    ) {
+
+        throw new Error(
+            'Minecraft client mavjud emas.'
+        );
+    }
+
+    if (
+        !connected
+    ) {
+
+        throw new Error(
+            'Minecraft serverga ulanmagan.'
+        );
+    }
+
+    try {
+
+        client.write(
+            name,
+            params
+        );
+
+        emit(
+            'minecraft:packet_sent',
+            {
+                name,
+                params
+            }
+        );
+
+        return true;
+
+    } catch (
+        error
+    ) {
+
+        logger().error?.(
+            `Packet yuborilmadi: ${name}: ${error.message}`
+        );
+
+        emit(
+            'minecraft:packet_send_error',
+            {
+                name,
+                params,
+
+                error:
+                    error.message
+            }
+        );
+
+        return false;
+    }
+}
+
+/* ============================================================
+   CHAT
+============================================================ */
+
+function chat(
+    message
+) {
+
+    if (
+        typeof message !==
+        'string' ||
+        !message.trim()
+    ) {
+
+        throw new Error(
+            'Chat xabari bo‘sh bo‘lishi mumkin emas.'
+        );
+    }
+
+    const text =
+        message
+            .trim()
+            .slice(
+                0,
+                512
+            );
+
+    return sendPacket(
+        'text',
+        {
+            type:
+                'chat',
+
+            needs_translation:
+                false,
+
+            source_name:
+                context?.config?.minecraft?.username ||
+                'AKV_AI',
+
+            message:
+                text,
+
+            xuid:
+                '',
+
+            platform_chat_id:
+                ''
+        }
+    );
+}
+
+/* ============================================================
+   GETTERS
+============================================================ */
+
+function getClient() {
+    return client;
+}
+
+function isConnected() {
+    return connected;
+}
+
+function isSpawned() {
+    return spawned;
+}
+
+function isAuthenticated() {
+    return authenticated;
+}
+
+function getConnectionInfo() {
+
+    return {
+
+        connected,
+
+        spawned,
+
+        authenticated,
+
+        reconnectAttempts,
+
+        lastConnectStartedAt,
+
+        lastDisconnectAt,
+
+        host:
+            context?.config?.minecraft?.host ||
+            null,
+
+        port:
+            context?.config?.minecraft?.port ||
+            null,
+
+        version:
+            context?.config?.minecraft?.version ||
+            null,
+
+        username:
+            context?.config?.minecraft?.username ||
+            null
+    };
+}
+
+/* ============================================================
+   RAW PACKET SUBSCRIPTION
+============================================================ */
+
+function onPacket(
+    callback
+) {
+
+    if (
+        typeof callback !==
+        'function'
+    ) {
+
+        throw new TypeError(
+            'onPacket callback function bo‘lishi kerak.'
+        );
+    }
+
+    if (
+        !client
+    ) {
+
+        throw new Error(
+            'Client hali yaratilmagan.'
+        );
+    }
+
+    client.on(
+        'packet',
+        callback
+    );
+
+    return () => {
+
+        try {
+
+            if (
+                typeof client.off ===
+                'function'
+            ) {
+
+                client.off(
+                    'packet',
+                    callback
+                );
+            }
+
+        } catch {
+            // eski EventEmitter uchun
+        }
+    };
+}
+
+/* ============================================================
+   INITIALIZE
+============================================================ */
+
+async function initialize(
+    agentContext
+) {
+
+    if (
+        !agentContext
+    ) {
+
+        throw new Error(
+            'Minecraft client initialize uchun context kerak.'
+        );
+    }
+
+    context =
+        agentContext;
+
+    logger().info(
+        'Minecraft client module initialized.'
+    );
+
+    emit(
+        'minecraft:module_initialized',
+        {
+            version:
+                context.config?.minecraft?.version ||
+                '1.26.30'
+        }
+    );
+
+    await connect();
+}
+
+/* ============================================================
+   STATUS
+============================================================ */
+
+function getStatus() {
+
+    return {
+
+        module:
+            'minecraft-client',
+
+        connected,
+
+        spawned,
+
+        authenticated,
+
+        reconnectAttempts,
+
+        host:
+            context?.config?.minecraft?.host ||
+            null,
+
+        port:
+            context?.config?.minecraft?.port ||
+            null,
+
+        version:
+            context?.config?.minecraft?.version ||
+            null,
+
+        username:
+            context?.config?.minecraft?.username ||
+            null
+    };
+}
+
+/* ============================================================
+   EXPORTS
+============================================================ */
+
+module.exports = {
+
+    initialize,
+
+    connect,
+
+    disconnect,
+
+    createClient,
+
+    sendPacket,
+
+    chat,
+
+    onPacket,
+
+    getClient,
+
+    isConnected,
+
+    isSpawned,
+
+    isAuthenticated,
+
+    getConnectionInfo,
+
+    getStatus,
+
+    scheduleReconnect
+};
