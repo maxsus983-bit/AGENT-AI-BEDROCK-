@@ -1,789 +1,423 @@
 'use strict';
 
 const http = require('http');
-const crypto = require('crypto');
-
 const context = require('./core/agent-context');
-const logger = require('./core/logger');
 
-class CommandAPI {
+const PORT = Number(
+process.env.COMMAND_API_PORT || 3000
+);
 
-    constructor() {
+const HOST =
+process.env.COMMAND_API_HOST || '0.0.0.0';
 
-        this.server = null;
-        this.running = false;
+let server = null;
 
-        this.host =
-            context.config?.server?.host ||
-            process.env.HTTP_HOST ||
-            '0.0.0.0';
+function jsonResponse(res, statusCode, data) {
+const body = JSON.stringify(data);
 
-        this.port =
-            Number(
-                context.config?.server?.port ||
-                process.env.HTTP_PORT ||
-                3000
+res.writeHead(statusCode, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body)
+});
+
+res.end(body);
+
+}
+
+function readBody(req) {
+return new Promise((resolve, reject) => {
+
+    let body = '';
+
+    req.on('data', chunk => {
+
+        body += chunk.toString();
+
+        // Juda katta requestni qabul qilmaymiz.
+        if (body.length > 10000) {
+            reject(
+                new Error('Request juda katta.')
             );
 
-        /*
-         * API kaliti.
-         *
-         * .env ichida:
-         *
-         * COMMAND_API_KEY=your-secret-key
-         *
-         * Agar berilmagan bo‘lsa, vaqtinchalik
-         * random key yaratiladi.
-         */
-
-        this.apiKey =
-            process.env.COMMAND_API_KEY ||
-            crypto.randomBytes(24).toString('hex');
-
-        this.maxBodySize = 64 * 1024;
-
-        context.register(
-            'command-api',
-            this
-        );
-    }
-
-    start() {
-
-        if (this.running) {
-
-            logger.warn(
-                'Command API allaqachon ishlayapti.'
-            );
-
-            return {
-                success: true,
-                alreadyRunning: true,
-                port: this.port
-            };
+            req.destroy();
         }
+    });
 
-        this.server =
-            http.createServer(
-                async (req, res) => {
+    req.on('end', () => {
+        resolve(body);
+    });
 
-                    try {
+    req.on('error', reject);
+});
 
-                        await this.handleRequest(
-                            req,
-                            res
-                        );
+}
 
-                    } catch (error) {
+async function handleCommand(req, res) {
 
-                        logger.error(
-                            'Command API request error.',
-                            {
-                                error:
-                                    error.message
-                            }
-                        );
+try {
 
-                        this.sendJson(
-                            res,
-                            500,
-                            {
-                                success: false,
-                                error:
-                                    'Internal server error.'
-                            }
-                        );
-                    }
-                }
-            );
+    const raw =
+        await readBody(req);
 
-        this.server.on(
-            'error',
-            error => {
+    let payload = {};
 
-                logger.error(
-                    'Command API server error.',
-                    {
-                        error:
-                            error.message
-                    }
-                );
-
-                this.running = false;
-            }
-        );
-
-        this.server.listen(
-            this.port,
-            this.host,
-            () => {
-
-                this.running = true;
-
-                logger.success(
-                    `Command API ishga tushdi: ${this.host}:${this.port}`
-                );
-
-                logger.info(
-                    `Command API endpoint: POST /command`
-                );
-
-                logger.info(
-                    `Command API status: GET /status`
-                );
-            }
-        );
-
-        return {
-            success: true,
-            host: this.host,
-            port: this.port
-        };
-    }
-
-    async stop() {
-
-        if (!this.server) {
-
-            this.running = false;
-
-            return {
-                success: true
-            };
-        }
-
-        return new Promise(
-            resolve => {
-
-                this.server.close(
-                    () => {
-
-                        this.server = null;
-                        this.running = false;
-
-                        logger.info(
-                            'Command API to‘xtatildi.'
-                        );
-
-                        resolve({
-                            success: true
-                        });
-                    }
-                );
-            }
-        );
-    }
-
-    async handleRequest(
-        req,
-        res
-    ) {
-
-        this.setCorsHeaders(
-            res
-        );
-
-        /*
-         * OPTIONS — CORS preflight
-         */
-
-        if (
-            req.method ===
-            'OPTIONS'
-        ) {
-
-            res.writeHead(
-                204
-            );
-
-            res.end();
-
-            return;
-        }
-
-        const url =
-            new URL(
-                req.url,
-                `http://${req.headers.host || 'localhost'}`
-            );
-
-        /*
-         * --------------------------------------------------
-         * GET /
-         * --------------------------------------------------
-         */
-
-        if (
-            req.method === 'GET' &&
-            url.pathname === '/'
-        ) {
-
-            this.sendJson(
-                res,
-                200,
-                {
-                    success: true,
-                    name: 'AKV Minecraft AI Command API',
-                    version: '1.0.0',
-                    endpoints: {
-                        status:
-                            'GET /status',
-
-                        command:
-                            'POST /command'
-                    }
-                }
-            );
-
-            return;
-        }
-
-        /*
-         * --------------------------------------------------
-         * GET /status
-         * --------------------------------------------------
-         */
-
-        if (
-            req.method === 'GET' &&
-            url.pathname === '/status'
-        ) {
-
-            const minecraft =
-                context.get(
-                    'minecraft'
-                );
-
-            const executor =
-                context.get(
-                    'command-executor'
-                );
-
-            const router =
-                context.get(
-                    'command-router'
-                );
-
-            this.sendJson(
-                res,
-                200,
-                {
-                    success: true,
-
-                    api: {
-                        running:
-                            this.running,
-
-                        host:
-                            this.host,
-
-                        port:
-                            this.port
-                    },
-
-                    minecraft: {
-                        connected:
-                            Boolean(
-                                context.state?.connected
-                            ),
-
-                        spawned:
-                            Boolean(
-                                context.state?.spawned
-                            ),
-
-                        authenticated:
-                            Boolean(
-                                context.state?.authenticated
-                            )
-                    },
-
-                    modules: {
-                        minecraft:
-                            Boolean(minecraft),
-
-                        commandExecutor:
-                            Boolean(executor),
-
-                        commandRouter:
-                            Boolean(router)
-                    },
-
-                    state: {
-                        position:
-                            context.state?.position ||
-                            null,
-
-                        health:
-                            context.state?.health ||
-                            null,
-
-                        hunger:
-                            context.state?.hunger ||
-                            null,
-
-                        currentTask:
-                            context.state?.currentTask ||
-                            null,
-
-                        autonomousMode:
-                            Boolean(
-                                context.state?.autonomousMode
-                            )
-                    }
-                }
-            );
-
-            return;
-        }
-
-        /*
-         * --------------------------------------------------
-         * POST /command
-         * --------------------------------------------------
-         */
-
-        if (
-            req.method === 'POST' &&
-            url.pathname === '/command'
-        ) {
-
-            /*
-             * API authentication
-             */
-
-            if (
-                !this.authorize(req)
-            ) {
-
-                this.sendJson(
-                    res,
-                    401,
-                    {
-                        success: false,
-                        error:
-                            'Unauthorized.'
-                    }
-                );
-
-                return;
-            }
-
-            const body =
-                await this.readBody(
-                    req
-                );
-
-            let payload;
-
-            try {
-
-                payload =
-                    JSON.parse(body);
-
-            } catch (_) {
-
-                this.sendJson(
-                    res,
-                    400,
-                    {
-                        success: false,
-                        error:
-                            'Request JSON formatida bo‘lishi kerak.'
-                    }
-                );
-
-                return;
-            }
-
-            const command =
-                payload.command ||
-                payload.text ||
-                payload.message ||
-                payload.prompt;
-
-            if (
-                typeof command !==
-                'string' ||
-                !command.trim()
-            ) {
-
-                this.sendJson(
-                    res,
-                    400,
-                    {
-                        success: false,
-                        error:
-                            'command maydoni kerak.'
-                    }
-                );
-
-                return;
-            }
-
-            if (
-                command.length >
-                4000
-            ) {
-
-                this.sendJson(
-                    res,
-                    400,
-                    {
-                        success: false,
-                        error:
-                            'Buyruq juda uzun. Maksimum 4000 belgi.'
-                    }
-                );
-
-                return;
-            }
-
-            const executor =
-                context.get(
-                    'command-executor'
-                );
-
-            /*
-             * Agar executor hali contextga
-             * ro‘yxatdan o‘tmagan bo‘lsa,
-             * command-router fallback.
-             */
-
-            if (!executor) {
-
-                const router =
-                    context.get(
-                        'command-router'
-                    );
-
-                if (!router) {
-
-                    this.sendJson(
-                        res,
-                        503,
-                        {
-                            success: false,
-                            error:
-                                'Command Executor va Command Router topilmadi.'
-                        }
-                    );
-
-                    return;
-                }
-
-                const result =
-                    await router.handle(
-                        command.trim(),
-                        'api',
-                        payload.user ||
-                        null
-                    );
-
-                this.sendJson(
-                    res,
-                    200,
-                    {
-                        success:
-                            result?.success !== false,
-
-                        result
-                    }
-                );
-
-                return;
-            }
-
-            /*
-             * Asosiy execution
-             */
-
-            const result =
-                await executor.handleExternal({
-
-                    command:
-                        command.trim(),
-
-                    source:
-                        'api',
-
-                    channel:
-                        'http-api',
-
-                    user:
-                        payload.user ||
-                        payload.username ||
-                        payload.userId ||
-                        null,
-
-                    requestId:
-                        payload.requestId ||
-                        null,
-
-                    raw:
-                        payload
-                });
-
-            const formatted =
-                typeof executor.formatResponse ===
-                'function'
-                    ? executor.formatResponse(result)
-                    : {
-                        text:
-                            result?.success === false
-                                ? `❌ ${result.error || 'Buyruq bajarilmadi.'}`
-                                : '✅ Buyruq bajarildi.',
-                        success:
-                            result?.success !== false
-                    };
-
-            logger.info(
-                `External command received: ${command.trim()}`,
-                {
-                    source: 'api',
-                    user:
-                        payload.user ||
-                        payload.username ||
-                        null
-                }
-            );
-
-            this.sendJson(
-                res,
-                result?.success === false
-                    ? 400
-                    : 200,
-                {
-                    success:
-                        result?.success !== false,
-
-                    message:
-                        formatted.text,
-
-                    requestId:
-                        result?.requestId ||
-                        null,
-
-                    result
-                }
-            );
-
-            return;
-        }
-
-        /*
-         * --------------------------------------------------
-         * 404
-         * --------------------------------------------------
-         */
-
-        this.sendJson(
-            res,
-            404,
-            {
-                success: false,
-                error:
-                    'Endpoint topilmadi.'
-            }
-        );
-    }
-
-    authorize(req) {
-
-        const receivedKey =
-            req.headers['x-api-key'];
-
-        if (
-            !receivedKey
-        ) {
-
-            return false;
-        }
-
-        return this.safeCompare(
-            String(receivedKey),
-            String(this.apiKey)
-        );
-    }
-
-    safeCompare(
-        a,
-        b
-    ) {
-
-        const first =
-            Buffer.from(
-                a,
-                'utf8'
-            );
-
-        const second =
-            Buffer.from(
-                b,
-                'utf8'
-            );
-
-        if (
-            first.length !==
-            second.length
-        ) {
-
-            return false;
-        }
-
-        return crypto.timingSafeEqual(
-            first,
-            second
-        );
-    }
-
-    readBody(req) {
-
-        return new Promise(
-            (resolve, reject) => {
-
-                let body = '';
-
-                let size = 0;
-
-                req.setEncoding(
-                    'utf8'
-                );
-
-                req.on(
-                    'data',
-                    chunk => {
-
-                        size +=
-                            Buffer.byteLength(
-                                chunk,
-                                'utf8'
-                            );
-
-                        if (
-                            size >
-                            this.maxBodySize
-                        ) {
-
-                            reject(
-                                new Error(
-                                    'Request body juda katta.'
-                                )
-                            );
-
-                            req.destroy();
-
-                            return;
-                        }
-
-                        body += chunk;
-                    }
-                );
-
-                req.on(
-                    'end',
-                    () => {
-
-                        resolve(
-                            body
-                        );
-                    }
-                );
-
-                req.on(
-                    'error',
-                    error => {
-
-                        reject(
-                            error
-                        );
-                    }
-                );
-            }
-        );
-    }
-
-    setCorsHeaders(
-        res
-    ) {
-
-        res.setHeader(
-            'Access-Control-Allow-Origin',
-            '*'
-        );
-
-        res.setHeader(
-            'Access-Control-Allow-Methods',
-            'GET, POST, OPTIONS'
-        );
-
-        res.setHeader(
-            'Access-Control-Allow-Headers',
-            'Content-Type, X-API-Key'
-        );
-
-        res.setHeader(
-            'Content-Type',
-            'application/json; charset=utf-8'
-        );
-    }
-
-    sendJson(
-        res,
-        status,
-        data
-    ) {
+    if (raw.trim()) {
 
         try {
 
-            res.writeHead(
-                status
-            );
+            payload =
+                JSON.parse(raw);
 
-            res.end(
-                JSON.stringify(
-                    data,
-                    null,
-                    2
-                )
-            );
+        } catch (_) {
 
-        } catch (error) {
-
-            logger.error(
-                'Command API response error.',
+            return jsonResponse(
+                res,
+                400,
                 {
+                    success: false,
                     error:
-                        error.message
+                        'JSON noto‘g‘ri.'
                 }
             );
         }
     }
 
-    status() {
+    const command =
+        payload.command ||
+        payload.text ||
+        payload.message;
 
-        return {
+    if (
+        typeof command !== 'string' ||
+        !command.trim()
+    ) {
 
-            running:
-                this.running,
-
-            host:
-                this.host,
-
-            port:
-                this.port,
-
-            endpoint:
-                '/command'
-        };
+        return jsonResponse(
+            res,
+            400,
+            {
+                success: false,
+                error:
+                    'command maydoni kerak.'
+            }
+        );
     }
+
+    /*
+     * Command Executor mavjud bo‘lsa,
+     * undan foydalanamiz.
+     */
+
+    const executor =
+        context.get(
+            'command-executor'
+        );
+
+    if (
+        executor &&
+        typeof executor.handleExternal ===
+        'function'
+    ) {
+
+        const result =
+            await executor.handleExternal({
+
+                command:
+                    command.trim(),
+
+                source:
+                    'http',
+
+                channel:
+                    'command-api',
+
+                user:
+                    payload.user ||
+                    'external',
+
+                requestId:
+                    payload.requestId ||
+                    null
+            });
+
+        return jsonResponse(
+            res,
+            200,
+            result
+        );
+    }
+
+    /*
+     * Executor bo‘lmasa,
+     * command-router fallback.
+     */
+
+    const router =
+        context.get(
+            'command-router'
+        );
+
+    if (
+        router &&
+        typeof router.handle ===
+        'function'
+    ) {
+
+        const result =
+            await router.handle(
+                command.trim(),
+                'http',
+                payload.user ||
+                'external'
+            );
+
+        return jsonResponse(
+            res,
+            200,
+            result
+        );
+    }
+
+    return jsonResponse(
+        res,
+        503,
+        {
+            success: false,
+            error:
+                'Command Executor yoki Command Router hali ishga tushmagan.'
+        }
+    );
+
+} catch (error) {
+
+    return jsonResponse(
+        res,
+        500,
+        {
+            success: false,
+            error:
+                error.message
+        }
+    );
 }
 
-const commandAPI =
-    new CommandAPI();
+}
 
-module.exports =
-    commandAPI;
+function handleHealth(req, res) {
 
-module.exports.CommandAPI =
-    CommandAPI;
+const executor =
+    context.get(
+        'command-executor'
+    );
+
+const router =
+    context.get(
+        'command-router'
+    );
+
+jsonResponse(
+    res,
+    200,
+    {
+        success: true,
+
+        service:
+            'AKV Command API',
+
+        running:
+            true,
+
+        executor:
+            Boolean(executor),
+
+        router:
+            Boolean(router),
+
+        minecraft:
+            context.state
+                ? {
+                    connected:
+                        context.state.connected,
+
+                    spawned:
+                        context.state.spawned
+                }
+                : null,
+
+        timestamp:
+            new Date().toISOString()
+    }
+);
+
+}
+
+function start() {
+
+if (server) {
+    return server;
+}
+
+server =
+    http.createServer(
+        async (req, res) => {
+
+            /*
+             * CORS
+             */
+
+            res.setHeader(
+                'Access-Control-Allow-Origin',
+                '*'
+            );
+
+            res.setHeader(
+                'Access-Control-Allow-Methods',
+                'GET, POST, OPTIONS'
+            );
+
+            res.setHeader(
+                'Access-Control-Allow-Headers',
+                'Content-Type'
+            );
+
+            if (
+                req.method ===
+                'OPTIONS'
+            ) {
+
+                res.writeHead(
+                    204
+                );
+
+                return res.end();
+            }
+
+            /*
+             * Health
+             */
+
+            if (
+                req.method === 'GET' &&
+                req.url === '/health'
+            ) {
+
+                return handleHealth(
+                    req,
+                    res
+                );
+            }
+
+            /*
+             * Command endpoint
+             */
+
+            if (
+                req.method === 'POST' &&
+                req.url === '/command'
+            ) {
+
+                return handleCommand(
+                    req,
+                    res
+                );
+            }
+
+            /*
+             * API haqida ma'lumot
+             */
+
+            if (
+                req.method === 'GET' &&
+                req.url === '/'
+            ) {
+
+                return jsonResponse(
+                    res,
+                    200,
+                    {
+                        success: true,
+
+                        service:
+                            'AKV Command API',
+
+                        endpoints: {
+                            health:
+                                'GET /health',
+
+                            command:
+                                'POST /command'
+                        },
+
+                        example: {
+                            command:
+                                'oldinga yur'
+                        }
+                    }
+                );
+            }
+
+            return jsonResponse(
+                res,
+                404,
+                {
+                    success: false,
+                    error:
+                        'Endpoint topilmadi.'
+                }
+            );
+        }
+    );
+
+server.listen(
+    PORT,
+    HOST,
+    () => {
+
+        console.log(
+            `[COMMAND API] Ishga tushdi: ${HOST}:${PORT}`
+        );
+
+        console.log(
+            `[COMMAND API] Buyruq endpoint: POST /command`
+        );
+
+        console.log(
+            `[COMMAND API] Health endpoint: GET /health`
+        );
+    }
+);
+
+server.on(
+    'error',
+    error => {
+
+        console.error(
+            '[COMMAND API] Server xatosi:',
+            error.message
+        );
+    }
+);
+
+return server;
+
+}
+
+function stop() {
+
+if (!server) {
+    return;
+}
+
+server.close();
+
+server = null;
+
+}
+
+module.exports = {
+
+start,
+
+stop
+
+};
