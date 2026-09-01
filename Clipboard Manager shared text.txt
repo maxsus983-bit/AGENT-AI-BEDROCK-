@@ -1,0 +1,1658 @@
+'use strict';
+
+const context = require('../core/agent-context');
+const logger = require('../core/logger');
+
+class AutonomousAgent {
+
+    constructor() {
+        this.running = false;
+        this.enabled = false;
+        this.busy = false;
+
+        this.interval = null;
+        this.intervalMs = 1500;
+
+        this.lastDecision = null;
+        this.lastAction = null;
+        this.lastError = null;
+
+        this.goal = null;
+        this.mode = 'idle';
+
+        this.observation = null;
+
+        this.cycle = 0;
+        this.startedAt = null;
+        this.lastCycleAt = null;
+
+        this.maxActionHistory = 5000;
+        this.actionHistory = [];
+
+        this.settings = {
+            autonomous: false,
+
+            observeBeforeDecision: true,
+
+            rememberActions: true,
+
+            allowMovement: true,
+            allowCombat: true,
+            allowBuilding: true,
+            allowChat: true,
+
+            followGoals: true,
+
+            recoverFromErrors: true,
+
+            decisionInterval: 1500,
+
+            maxActionsPerCycle: 3,
+
+            reportImportantEvents: true
+        };
+
+        context.register(
+            'autonomous-agent',
+            this
+        );
+    }
+
+    start() {
+
+        if (this.running) {
+            return;
+        }
+
+        this.running = true;
+
+        this.intervalMs =
+            this.settings.decisionInterval;
+
+        logger.info(
+            'Autonomous Agent ishga tushdi.'
+        );
+    }
+
+    stop() {
+
+        this.disable();
+
+        this.running = false;
+
+        if (this.interval) {
+
+            clearInterval(
+                this.interval
+            );
+
+            this.interval = null;
+        }
+
+        logger.info(
+            'Autonomous Agent to‘xtadi.'
+        );
+    }
+
+    enable(options = {}) {
+
+        this.start();
+
+        this.enabled = true;
+
+        this.settings.autonomous =
+            true;
+
+        if (
+            options.interval
+        ) {
+
+            this.settings.decisionInterval =
+                Math.max(
+                    250,
+                    Number(
+                        options.interval
+                    )
+                );
+        }
+
+        if (
+            options.goal
+        ) {
+
+            this.goal =
+                String(
+                    options.goal
+                );
+        }
+
+        this.startLoop();
+
+        context.eventBus.emitSafe(
+            'autonomous:enabled',
+            {
+                goal:
+                    this.goal
+            }
+        );
+
+        return {
+
+            success: true,
+
+            enabled: true,
+
+            goal:
+                this.goal
+        };
+    }
+
+    disable() {
+
+        this.enabled = false;
+
+        this.settings.autonomous =
+            false;
+
+        if (this.interval) {
+
+            clearInterval(
+                this.interval
+            );
+
+            this.interval = null;
+        }
+
+        this.mode = 'idle';
+
+        context.eventBus.emitSafe(
+            'autonomous:disabled',
+            {}
+        );
+
+        return {
+
+            success: true,
+
+            enabled: false
+        };
+    }
+
+    setGoal(goal) {
+
+        if (
+            goal === null ||
+            goal === undefined
+        ) {
+
+            this.goal = null;
+
+            return {
+
+                success: true,
+
+                goal: null
+            };
+        }
+
+        this.goal =
+            String(goal)
+                .trim();
+
+        return {
+
+            success: true,
+
+            goal:
+                this.goal
+        };
+    }
+
+    startLoop() {
+
+        if (!this.enabled) {
+            return;
+        }
+
+        if (this.interval) {
+            clearInterval(
+                this.interval
+            );
+        }
+
+        this.interval =
+            setInterval(
+                () => {
+
+                    this.cycleOnce()
+                        .catch(
+                            error => {
+
+                                this.lastError =
+                                    error.message;
+
+                                logger.error(
+                                    `Autonomous cycle xatosi: ${error.message}`
+                                );
+                            }
+                        );
+
+                },
+                this.settings
+                    .decisionInterval
+            );
+    }
+
+    async cycleOnce() {
+
+        if (
+            !this.running ||
+            !this.enabled
+        ) {
+
+            return {
+
+                success: false,
+
+                reason:
+                    'Autonomous Agent faol emas.'
+            };
+        }
+
+        if (this.busy) {
+
+            return {
+
+                success: false,
+
+                reason:
+                    'Oldingi cycle hali tugamagan.'
+            };
+        }
+
+        this.busy = true;
+
+        this.cycle++;
+
+        this.lastCycleAt =
+            Date.now();
+
+        try {
+
+            const observation =
+                await this.observe();
+
+            this.observation =
+                observation;
+
+            const decision =
+                await this.decide(
+                    observation
+                );
+
+            this.lastDecision =
+                decision;
+
+            if (
+                !decision ||
+                decision.action ===
+                'wait'
+            ) {
+
+                this.mode =
+                    'observing';
+
+                this.reportDecision(
+                    decision
+                );
+
+                return {
+
+                    success: true,
+
+                    action:
+                        'wait',
+
+                    decision
+                };
+            }
+
+            const execution =
+                await this.executeDecision(
+                    decision
+                );
+
+            this.lastAction =
+                execution;
+
+            this.recordAction(
+                decision,
+                execution
+            );
+
+            await this.learn(
+                observation,
+                decision,
+                execution
+            );
+
+            this.reportDecision(
+                decision,
+                execution
+            );
+
+            return {
+
+                success:
+                    execution?.success !== false,
+
+                cycle:
+                    this.cycle,
+
+                decision,
+
+                execution
+            };
+
+        } catch (error) {
+
+            this.lastError =
+                error.message;
+
+            logger.error(
+                `Autonomous Agent: ${error.message}`
+            );
+
+            if (
+                this.settings
+                    .recoverFromErrors
+            ) {
+
+                await this.recover(
+                    error
+                );
+            }
+
+            return {
+
+                success: false,
+
+                error:
+                    error.message
+            };
+
+        } finally {
+
+            this.busy = false;
+        }
+    }
+
+    async observe() {
+
+        const snapshot = {
+
+            timestamp:
+                Date.now(),
+
+            goal:
+                this.goal,
+
+            bot:
+                null,
+
+            world:
+                null,
+
+            players:
+                null,
+
+            events:
+                null
+        };
+
+        const state =
+            context.get(
+                'state'
+            );
+
+        if (
+            state &&
+            typeof state.get ===
+            'function'
+        ) {
+
+            try {
+
+                snapshot.bot =
+                    await state.get();
+
+            } catch (_) {}
+        }
+
+        const observer =
+            context.get(
+                'world-observer'
+            );
+
+        if (
+            observer
+        ) {
+
+            try {
+
+                if (
+                    typeof observer.getSnapshot ===
+                    'function'
+                ) {
+
+                    snapshot.world =
+                        await observer
+                            .getSnapshot();
+
+                } else if (
+                    typeof observer.snapshot ===
+                    'function'
+                ) {
+
+                    snapshot.world =
+                        await observer
+                            .snapshot();
+                }
+
+            } catch (error) {
+
+                logger.warn(
+                    `World observation xatosi: ${error.message}`
+                );
+            }
+        }
+
+        const tracker =
+            context.get(
+                'player-tracker'
+            );
+
+        if (
+            tracker
+        ) {
+
+            try {
+
+                if (
+                    typeof tracker.getSnapshot ===
+                    'function'
+                ) {
+
+                    snapshot.players =
+                        await tracker
+                            .getSnapshot();
+
+                } else if (
+                    typeof tracker.list ===
+                    'function'
+                ) {
+
+                    snapshot.players =
+                        await tracker.list();
+                }
+
+            } catch (error) {
+
+                logger.warn(
+                    `Player observation xatosi: ${error.message}`
+                );
+            }
+        }
+
+        const events =
+            context.get(
+                'event-observer'
+            );
+
+        if (
+            events &&
+            typeof events.getRecent ===
+            'function'
+        ) {
+
+            try {
+
+                snapshot.events =
+                    await events.getRecent(
+                        30
+                    );
+
+            } catch (_) {}
+        }
+
+        return this.limitObservation(
+            snapshot
+        );
+    }
+
+    async decide(
+        observation
+    ) {
+
+        /*
+         * Avval aniq va xavfsiz lokal holatlarni tekshiramiz.
+         * AI faqat kerak bo'lganda qaror qatlamiga kiradi.
+         */
+
+        const emergency =
+            this.detectEmergency(
+                observation
+            );
+
+        if (emergency) {
+            return emergency;
+        }
+
+        const explicitGoal =
+            this.goal;
+
+        if (
+            explicitGoal &&
+            this.settings.followGoals
+        ) {
+
+            const ai =
+                this.getAI();
+
+            if (
+                ai
+            ) {
+
+                try {
+
+                    const decision =
+                        await this.askAI(
+                            ai,
+                            observation,
+                            explicitGoal
+                        );
+
+                    const valid =
+                        this.validateDecision(
+                            decision
+                        );
+
+                    if (
+                        valid.valid
+                    ) {
+
+                        return decision;
+                    }
+
+                } catch (error) {
+
+                    logger.warn(
+                        `Autonomous AI qarori ishlamadi: ${error.message}`
+                    );
+                }
+            }
+        }
+
+        /*
+         * Maqsad berilmagan bo'lsa, xavfsiz kuzatuv rejimi.
+         * Bot o'z-o'zidan tasodifiy destructive action bajarmaydi.
+         */
+
+        return this.defaultDecision(
+            observation
+        );
+    }
+
+    detectEmergency(
+        observation
+    ) {
+
+        const bot =
+            observation &&
+            observation.bot;
+
+        if (!bot) {
+            return null;
+        }
+
+        const health =
+            Number(
+                bot.health
+            );
+
+        const maxHealth =
+            Number(
+                bot.maxHealth ||
+                20
+            );
+
+        if (
+            Number.isFinite(health) &&
+            Number.isFinite(maxHealth) &&
+            maxHealth > 0
+        ) {
+
+            const ratio =
+                health /
+                maxHealth;
+
+            if (
+                ratio <= 0.15
+            ) {
+
+                return {
+
+                    action:
+                        'retreat',
+
+                    parameters: {
+
+                        reason:
+                            'critical_health'
+                    },
+
+                    reason:
+                        'HP kritik darajada.',
+
+                    confidence:
+                        0.99
+                };
+            }
+        }
+
+        return null;
+    }
+
+    defaultDecision(
+        observation
+    ) {
+
+        const players =
+            observation &&
+            observation.players;
+
+        if (
+            Array.isArray(players) &&
+            players.length > 0
+        ) {
+
+            return {
+
+                action:
+                    'report',
+
+                parameters: {},
+
+                reason:
+                    'Yangi kuzatuv ma’lumotlarini tahlil qilish.',
+
+                confidence:
+                    0.80
+            };
+        }
+
+        return {
+
+            action:
+                'wait',
+
+            parameters: {},
+
+            reason:
+                'Faol maqsad yo‘q; kuzatish davom etmoqda.',
+
+            confidence:
+                0.90
+        };
+    }
+
+    async askAI(
+        ai,
+        observation,
+        goal
+    ) {
+
+        const prompt = {
+
+            role:
+                'autonomous_minecraft_agent',
+
+            goal,
+
+            observation,
+
+            rules: {
+
+                allowedActions: [
+                    'move',
+                    'fight',
+                    'auto_fight',
+                    'build',
+                    'watch',
+                    'watch_hidden',
+                    'watch_all',
+                    'follow',
+                    'chat',
+                    'report',
+                    'scan',
+                    'remember',
+                    'recall',
+                    'autonomous',
+                    'stop',
+                    'status',
+                    'wait',
+                    'retreat'
+                ],
+
+                maxActions:
+                    this.settings
+                        .maxActionsPerCycle,
+
+                doNotInventCoordinates:
+                    true,
+
+                doNotInventPlayers:
+                    true,
+
+                doNotClaimSuccessWithoutExecution:
+                    true,
+
+                prioritizeSurvival:
+                    true
+            }
+        };
+
+        const system =
+            `
+SEN MINECRAFT AVTONOM AI AGENTINING QAROR MODULISAN.
+
+Senga botning joriy holati, dunyo kuzatuvi va maqsadi beriladi.
+
+Vazifa:
+1. Vaziyatni tahlil qil.
+2. Eng foydali keyingi actionni tanla.
+3. Kerak bo'lsa 1-3 ta ketma-ket action ber.
+4. Mavjud bo'lmagan koordinata, player yoki itemni o'ylab topma.
+5. Botning o'zi bajarmagan ishni bajarildi deb aytma.
+6. Hayot xavfi bo'lsa omon qolishni ustuvor qil.
+7. Maqsad bo'lmasa keraksiz destructive action boshlama.
+8. Foydalanuvchi maqsadini saqla.
+9. Har bir qarorning sababini yoz.
+10. Faqat JSON qaytar.
+
+FORMAT:
+
+{
+  "action": "move",
+  "parameters": {},
+  "reason": "...",
+  "confidence": 0.0,
+  "actions": []
+}
+
+actions array ichida:
+{
+  "action": "...",
+  "parameters": {}
+}
+
+Agar hech narsa qilish kerak bo'lmasa:
+{
+  "action": "wait",
+  "parameters": {},
+  "reason": "...",
+  "confidence": 0.9,
+  "actions": []
+}
+`;
+
+        const input =
+            JSON.stringify(
+                prompt
+            );
+
+        if (
+            typeof ai.chat ===
+            'function'
+        ) {
+
+            const response =
+                await ai.chat(
+                    [
+                        {
+                            role:
+                                'system',
+
+                            content:
+                                system
+                        },
+                        {
+                            role:
+                                'user',
+
+                            content:
+                                input
+                        }
+                    ]
+                );
+
+            return this.parseAI(
+                response
+            );
+        }
+
+        if (
+            typeof ai.ask ===
+            'function'
+        ) {
+
+            const response =
+                await ai.ask(
+                    `${system}\n${input}`
+                );
+
+            return this.parseAI(
+                response
+            );
+        }
+
+        if (
+            typeof ai.complete ===
+            'function'
+        ) {
+
+            const response =
+                await ai.complete(
+                    `${system}\n${input}`
+                );
+
+            return this.parseAI(
+                response
+            );
+        }
+
+        throw new Error(
+            'AI providerda mos metod topilmadi.'
+        );
+    }
+
+    parseAI(
+        response
+    ) {
+
+        let text;
+
+        if (
+            typeof response ===
+            'string'
+        ) {
+
+            text =
+                response;
+
+        } else if (
+            response?.choices?.[0]
+                ?.message?.content
+        ) {
+
+            text =
+                response
+                    .choices[0]
+                    .message
+                    .content;
+
+        } else if (
+            response?.message?.content
+        ) {
+
+            text =
+                response
+                    .message
+                    .content;
+
+        } else if (
+            response?.content
+        ) {
+
+            text =
+                response.content;
+
+        } else {
+
+            text =
+                JSON.stringify(
+                    response
+                );
+        }
+
+        text =
+            String(text)
+                .trim()
+                .replace(
+                    /^```json\s*/i,
+                    ''
+                )
+                .replace(
+                    /^```\s*/i,
+                    ''
+                )
+                .replace(
+                    /\s*```$/i,
+                    ''
+                );
+
+        try {
+
+            return JSON.parse(
+                text
+            );
+
+        } catch (_) {
+
+            const start =
+                text.indexOf('{');
+
+            const end =
+                text.lastIndexOf('}');
+
+            if (
+                start === -1 ||
+                end === -1
+            ) {
+
+                throw new Error(
+                    'AI autonomous javobi JSON emas.'
+                );
+            }
+
+            return JSON.parse(
+                text.slice(
+                    start,
+                    end + 1
+                )
+            );
+        }
+    }
+
+    validateDecision(
+        decision
+    ) {
+
+        if (
+            !decision ||
+            typeof decision !==
+            'object'
+        ) {
+
+            return {
+
+                valid: false,
+
+                error:
+                    'Decision object emas.'
+            };
+        }
+
+        const allowed =
+            new Set([
+
+                'move',
+                'fight',
+                'auto_fight',
+                'build',
+                'watch',
+                'watch_hidden',
+                'watch_all',
+                'follow',
+                'chat',
+                'report',
+                'scan',
+                'remember',
+                'recall',
+                'autonomous',
+                'stop',
+                'status',
+                'wait',
+                'retreat'
+            ]);
+
+        const actions =
+            Array.isArray(
+                decision.actions
+            )
+                ? decision.actions
+                : [];
+
+        const primary =
+            decision.action;
+
+        if (
+            primary &&
+            !allowed.has(
+                primary
+            )
+        ) {
+
+            return {
+
+                valid: false,
+
+                error:
+                    `Ruxsatsiz action: ${primary}`
+            };
+        }
+
+        for (
+            const action of actions
+        ) {
+
+            if (
+                !action ||
+                !allowed.has(
+                    action.action
+                )
+            ) {
+
+                return {
+
+                    valid: false,
+
+                    error:
+                        'Action ro‘yxatida noma’lum action bor.'
+                };
+            }
+        }
+
+        return {
+            valid: true
+        };
+    }
+
+    async executeDecision(
+        decision
+    ) {
+
+        if (
+            !decision
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Decision mavjud emas.'
+            };
+        }
+
+        const actions = [];
+
+        if (
+            decision.action &&
+            decision.action !==
+            'wait'
+        ) {
+
+            actions.push({
+
+                action:
+                    decision.action,
+
+                parameters:
+                    decision.parameters ||
+                    {}
+            });
+        }
+
+        if (
+            Array.isArray(
+                decision.actions
+            )
+        ) {
+
+            actions.push(
+                ...decision.actions
+            );
+        }
+
+        if (!actions.length) {
+
+            return {
+
+                success: true,
+
+                action:
+                    'wait',
+
+                results: []
+            };
+        }
+
+        const limited =
+            actions.slice(
+                0,
+                this.settings
+                    .maxActionsPerCycle
+            );
+
+        const registry =
+            context.get(
+                'action-registry'
+            );
+
+        if (!registry) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Action Registry topilmadi.'
+            };
+        }
+
+        const results = [];
+
+        for (
+            const item of limited
+        ) {
+
+            if (
+                !this.isActionAllowed(
+                    item.action
+                )
+            ) {
+
+                results.push({
+
+                    success: false,
+
+                    action:
+                        item.action,
+
+                    error:
+                        'Bu action autonomous rejimda ruxsat etilmagan.'
+                });
+
+                continue;
+            }
+
+            try {
+
+                const result =
+                    await registry.execute(
+                        item.action,
+                        item.parameters || {},
+                        {
+                            source:
+                                'autonomous-agent',
+
+                            cycle:
+                                this.cycle
+                        }
+                    );
+
+                results.push(
+                    result
+                );
+
+                /*
+                 * Birinchi action muvaffaqiyatsiz bo'lsa,
+                 * qolgan actionlar ko'r-ko'rona bajarilmaydi.
+                 */
+
+                if (
+                    result &&
+                    result.success === false
+                ) {
+
+                    break;
+                }
+
+            } catch (error) {
+
+                results.push({
+
+                    success: false,
+
+                    action:
+                        item.action,
+
+                    error:
+                        error.message
+                });
+
+                break;
+            }
+        }
+
+        return {
+
+            success:
+                results.every(
+                    result =>
+                        result &&
+                        result.success !== false
+                ),
+
+            actions:
+                limited,
+
+            results
+        };
+    }
+
+    isActionAllowed(
+        action
+    ) {
+
+        switch (action) {
+
+            case 'move':
+                return this.settings
+                    .allowMovement;
+
+            case 'fight':
+            case 'auto_fight':
+            case 'retreat':
+                return this.settings
+                    .allowCombat;
+
+            case 'build':
+                return this.settings
+                    .allowBuilding;
+
+            case 'chat':
+                return this.settings
+                    .allowChat;
+
+            default:
+                return true;
+        }
+    }
+
+    async learn(
+        observation,
+        decision,
+        execution
+    ) {
+
+        if (
+            !this.settings
+                .rememberActions
+        ) {
+
+            return;
+        }
+
+        const memory =
+            context.get(
+                'memory'
+            );
+
+        if (
+            !memory ||
+            typeof memory.addEvent !==
+            'function'
+        ) {
+
+            return;
+        }
+
+        try {
+
+            await memory.addEvent({
+
+                type:
+                    'autonomous_cycle',
+
+                timestamp:
+                    Date.now(),
+
+                cycle:
+                    this.cycle,
+
+                goal:
+                    this.goal,
+
+                decision,
+
+                execution,
+
+                observationSummary:
+                    this.summarizeObservation(
+                        observation
+                    )
+            });
+
+        } catch (error) {
+
+            logger.warn(
+                `Autonomous xotira yozuvi saqlanmadi: ${error.message}`
+            );
+        }
+    }
+
+    recordAction(
+        decision,
+        execution
+    ) {
+
+        const record = {
+
+            id:
+                this.generateId(),
+
+            timestamp:
+                Date.now(),
+
+            cycle:
+                this.cycle,
+
+            goal:
+                this.goal,
+
+            decision,
+
+            execution
+        };
+
+        this.actionHistory.push(
+            record
+        );
+
+        if (
+            this.actionHistory.length >
+            this.maxActionHistory
+        ) {
+
+            this.actionHistory.splice(
+                0,
+                this.actionHistory.length -
+                this.maxActionHistory
+            );
+        }
+    }
+
+    reportDecision(
+        decision,
+        execution = null
+    ) {
+
+        if (
+            !this.settings
+                .reportImportantEvents
+        ) {
+
+            return;
+        }
+
+        context.eventBus.emitSafe(
+            'autonomous:decision',
+            {
+
+                cycle:
+                    this.cycle,
+
+                goal:
+                    this.goal,
+
+                decision,
+
+                execution,
+
+                timestamp:
+                    Date.now()
+            }
+        );
+    }
+
+    async recover(
+        error
+    ) {
+
+        this.mode =
+            'recovery';
+
+        context.eventBus.emitSafe(
+            'autonomous:error',
+            {
+
+                error:
+                    error.message,
+
+                cycle:
+                    this.cycle,
+
+                timestamp:
+                    Date.now()
+            }
+        );
+
+        /*
+         * Xatodan keyin agressiv qayta urinish qilmaymiz.
+         * Keyingi cycle qayta kuzatishdan boshlanadi.
+         */
+
+        return {
+
+            success: true,
+
+            recovery:
+                'observation_reset'
+        };
+    }
+
+    summarizeObservation(
+        observation
+    ) {
+
+        if (!observation) {
+            return {};
+        }
+
+        return {
+
+            timestamp:
+                observation.timestamp,
+
+            goal:
+                observation.goal,
+
+            hasBotState:
+                Boolean(
+                    observation.bot
+                ),
+
+            hasWorld:
+                Boolean(
+                    observation.world
+                ),
+
+            playerCount:
+                Array.isArray(
+                    observation.players
+                )
+                    ? observation.players.length
+                    : null,
+
+            eventCount:
+                Array.isArray(
+                    observation.events
+                )
+                    ? observation.events.length
+                    : null
+        };
+    }
+
+    limitObservation(
+        observation
+    ) {
+
+        const max =
+            30000;
+
+        let serialized;
+
+        try {
+
+            serialized =
+                JSON.stringify(
+                    observation
+                );
+
+        } catch (_) {
+
+            return {
+                timestamp:
+                    Date.now()
+            };
+        }
+
+        if (
+            serialized.length <=
+            max
+        ) {
+
+            return observation;
+        }
+
+        return {
+
+            timestamp:
+                observation.timestamp,
+
+            goal:
+                observation.goal,
+
+            bot:
+                observation.bot,
+
+            world:
+                '[observation truncated]',
+
+            players:
+                Array.isArray(
+                    observation.players
+                )
+                    ? observation.players
+                        .slice(0, 100)
+                    : [],
+
+            events:
+                Array.isArray(
+                    observation.events
+                )
+                    ? observation.events
+                        .slice(-30)
+                    : []
+        };
+    }
+
+    getAI() {
+
+        return (
+            context.get(
+                'openrouter'
+            ) ||
+            context.get(
+                'ai-provider'
+            ) ||
+            context.get(
+                'ai'
+            ) ||
+            context.get(
+                'ai-brain'
+            )
+        );
+    }
+
+    getHistory(
+        limit = 100
+    ) {
+
+        const amount =
+            Math.max(
+                1,
+                Number(limit) || 100
+            );
+
+        return this.actionHistory.slice(
+            -amount
+        );
+    }
+
+    clearHistory() {
+
+        this.actionHistory = [];
+
+        return {
+            success: true
+        };
+    }
+
+    status() {
+
+        return {
+
+            running:
+                this.running,
+
+            enabled:
+                this.enabled,
+
+            busy:
+                this.busy,
+
+            mode:
+                this.mode,
+
+            goal:
+                this.goal,
+
+            cycle:
+                this.cycle,
+
+            lastCycleAt:
+                this.lastCycleAt,
+
+            lastDecision:
+                this.lastDecision,
+
+            lastAction:
+                this.lastAction,
+
+            lastError:
+                this.lastError,
+
+            history:
+                this.actionHistory.length,
+
+            settings:
+                {
+                    ...this.settings
+                }
+        };
+    }
+
+    generateId() {
+
+        return (
+            Date.now()
+                .toString(36) +
+            '-' +
+            Math.random()
+                .toString(36)
+                .slice(2, 10)
+        );
+    }
+}
+
+const autonomousAgent =
+    new AutonomousAgent();
+
+module.exports =
+    autonomousAgent;
+
+module.exports.AutonomousAgent =
+    AutonomousAgent;
