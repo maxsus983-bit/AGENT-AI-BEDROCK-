@@ -1,0 +1,265 @@
+'use strict';
+
+require('dotenv').config();
+
+const config = {
+
+    minecraft: {
+
+        /*
+        .env orqali o'zgartirish mumkin.
+        */
+
+        host:
+            process.env.MC_HOST ||
+            '',
+
+        port:
+            Number(
+                process.env.MC_PORT ||
+                19132
+            ),
+
+        version:
+            process.env.MC_VERSION ||
+            '1.26.30',
+
+        username:
+            process.env.MC_USERNAME ||
+            'AKV_AI',
+
+        offline:
+            process.env.MC_OFFLINE !== 'false',
+
+        autoReconnect:
+            process.env.MC_AUTO_RECONNECT !== 'false',
+
+        reconnectDelay:
+            Number(
+                process.env.MC_RECONNECT_DELAY ||
+                10000
+            )
+    },
+
+    ai: {
+
+        enabled: true,
+
+        autonomous:
+            true,
+
+        model:
+            process.env.AI_MODEL ||
+            'openrouter/free',
+
+        temperature:
+            0.7,
+
+        maxTokens:
+            4000,
+
+        /*
+        AI har qaroridan oldin
+        dunyo holatini tekshiradi.
+        */
+
+        decisionInterval:
+            1500
+    },
+
+    openrouter: {
+
+        apiKey:
+            process.env.OPENROUTER_API_KEY ||
+            '',
+
+        baseURL:
+            'https://openrouter.ai/api/v1',
+
+        timeout:
+            60000,
+
+        maxRetries:
+            3
+    },
+
+    memory: {
+
+        enabled: true,
+
+        database:
+            process.env.MEMORY_DATABASE ||
+            './data/memory/akv-memory.db',
+
+        /*
+        Xotira o'chirilmaydi,
+        faqat kerak bo'lsa arxivlanadi.
+        */
+
+        permanent:
+            true,
+
+        maxRecentMessages:
+            1000,
+
+        maxObservations:
+            100000
+    },
+
+    observer: {
+
+        enabled: true,
+
+        /*
+        Dunyo kuzatuvi.
+        */
+
+        watchPlayers:
+            true,
+
+        watchEntities:
+            true,
+
+        watchChat:
+            true,
+
+        watchBlocks:
+            true,
+
+        watchCombat:
+            true,
+
+        watchMovement:
+            true,
+
+        reportEverything:
+            true,
+
+        /*
+        true bo'lsa kuzatuv botga
+        tashqi kanal orqali ham yuboriladi.
+        */
+
+        realtime:
+            true
+    },
+
+    commands: {
+
+        remote:
+            true,
+
+        telegram:
+            true,
+
+        github:
+            true,
+
+        minecraftChat:
+            true,
+
+        /*
+        Tashqaridan kelgan buyruqlar
+        bir xil Command Routerga boradi.
+        */
+
+        requireConfirmationForDangerous:
+            true
+    },
+
+    telegram: {
+
+        enabled:
+            Boolean(
+                process.env.TELEGRAM_BOT_TOKEN
+            ),
+
+        token:
+            process.env.TELEGRAM_BOT_TOKEN ||
+            '',
+
+        adminId:
+            process.env.TELEGRAM_ADMIN_ID ||
+            ''
+    },
+
+    github: {
+
+        enabled:
+            Boolean(
+                process.env.GITHUB_TOKEN
+            ),
+
+        token:
+            process.env.GITHUB_TOKEN ||
+            '',
+
+        repository:
+            process.env.GITHUB_REPOSITORY ||
+            '',
+
+        /*
+        GitHub orqali command yuborish
+        keyingi modulda implement qilinadi.
+        */
+
+        pollInterval:
+            Number(
+                process.env.GITHUB_POLL_INTERVAL ||
+                10000
+            )
+    },
+
+    reports: {
+
+        enabled: true,
+
+        /*
+        AI o'zi muhim voqealarni
+        xabar qilib turadi.
+        */
+
+        autonomousReports:
+            true,
+
+        chatReports:
+            true,
+
+        playerReports:
+            true,
+
+        combatReports:
+            true,
+
+        buildReports:
+            true,
+
+        movementReports:
+            true
+    },
+
+    security: {
+
+        /*
+        Tashqi buyruqlarni faqat
+        ruxsat berilgan foydalanuvchilar
+        yubora olishi kerak.
+        */
+
+        requireAuthentication:
+            true,
+
+        allowUnknownCommands:
+            false
+    },
+
+    logging: {
+
+        enabled: true,
+
+        debug:
+            process.env.DEBUG === 'true'
+    }
+};
+
+module.exports = config;
