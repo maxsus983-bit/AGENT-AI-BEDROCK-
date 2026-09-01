@@ -1,0 +1,1423 @@
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const logger = require('../core/logger');
+
+class MemoryStore {
+
+    constructor(options = {}) {
+
+        this.dataDirectory =
+            options.dataDirectory ||
+            path.join(
+                process.cwd(),
+                'data',
+                'memory'
+            );
+
+        this.databaseFile =
+            path.join(
+                this.dataDirectory,
+                'memory.json'
+            );
+
+        this.indexFile =
+            path.join(
+                this.dataDirectory,
+                'index.json'
+            );
+
+        this.maxRecords =
+            Number(
+                options.maxRecords || 100000
+            );
+
+        this.records = [];
+
+        this.index = {
+
+            players: {},
+
+            locations: {},
+
+            events: {},
+
+            tags: {}
+        };
+
+        this.ready = false;
+
+        this.writeQueue =
+            Promise.resolve();
+
+        this.initialize();
+    }
+
+    initialize() {
+
+        try {
+
+            fs.mkdirSync(
+                this.dataDirectory,
+                {
+                    recursive: true
+                }
+            );
+
+            this.load();
+
+            this.ready = true;
+
+            logger.info(
+                `Memory Store ishga tushdi. ${this.records.length} ta xotira mavjud.`
+            );
+
+        } catch (error) {
+
+            logger.error(
+                `Memory Store initialize xatosi: ${error.message}`
+            );
+
+            this.records = [];
+
+            this.index = {
+
+                players: {},
+
+                locations: {},
+
+                events: {},
+
+                tags: {}
+            };
+
+            this.ready = true;
+        }
+    }
+
+    load() {
+
+        if (
+            fs.existsSync(
+                this.databaseFile
+            )
+        ) {
+
+            try {
+
+                const raw =
+                    fs.readFileSync(
+                        this.databaseFile,
+                        'utf8'
+                    );
+
+                const parsed =
+                    JSON.parse(raw);
+
+                if (
+                    Array.isArray(parsed)
+                ) {
+
+                    this.records =
+                        parsed;
+
+                } else if (
+                    parsed &&
+                    Array.isArray(
+                        parsed.records
+                    )
+                ) {
+
+                    this.records =
+                        parsed.records;
+                }
+
+            } catch (error) {
+
+                logger.warn(
+                    `Memory JSON o‘qilmadi: ${error.message}`
+                );
+            }
+        }
+
+        if (
+            fs.existsSync(
+                this.indexFile
+            )
+        ) {
+
+            try {
+
+                const raw =
+                    fs.readFileSync(
+                        this.indexFile,
+                        'utf8'
+                    );
+
+                const parsed =
+                    JSON.parse(raw);
+
+                if (
+                    parsed &&
+                    typeof parsed ===
+                    'object'
+                ) {
+
+                    this.index =
+                        parsed;
+                }
+
+            } catch (error) {
+
+                logger.warn(
+                    `Memory index o‘qilmadi: ${error.message}`
+                );
+            }
+        }
+
+        this.rebuildIndex();
+    }
+
+    async save() {
+
+        const payload = {
+
+            version:
+                1,
+
+            updatedAt:
+                Date.now(),
+
+            records:
+                this.records
+        };
+
+        this.writeQueue =
+            this.writeQueue.then(
+                async () => {
+
+                    await this.atomicWrite(
+                        this.databaseFile,
+                        JSON.stringify(
+                            payload,
+                            null,
+                            2
+                        )
+                    );
+
+                    await this.atomicWrite(
+                        this.indexFile,
+                        JSON.stringify(
+                            this.index,
+                            null,
+                            2
+                        )
+                    );
+                }
+            );
+
+        return this.writeQueue;
+    }
+
+    async atomicWrite(
+        file,
+        content
+    ) {
+
+        const temporary =
+            `${file}.tmp`;
+
+        await fs.promises.writeFile(
+            temporary,
+            content,
+            'utf8'
+        );
+
+        await fs.promises.rename(
+            temporary,
+            file
+        );
+    }
+
+    createRecord(
+        type,
+        data = {},
+        metadata = {}
+    ) {
+
+        return {
+
+            id:
+                this.generateId(),
+
+            type:
+                String(
+                    type ||
+                    'unknown'
+                ),
+
+            createdAt:
+                Date.now(),
+
+            updatedAt:
+                Date.now(),
+
+            importance:
+                Number(
+                    metadata.importance ??
+                    data.importance ??
+                    1
+                ),
+
+            source:
+                metadata.source ||
+                data.source ||
+                'agent',
+
+            tags:
+                this.normalizeTags(
+                    metadata.tags ||
+                    data.tags ||
+                    []
+                ),
+
+            player:
+                metadata.player ||
+                data.player ||
+                null,
+
+            location:
+                metadata.location ||
+                data.location ||
+                null,
+
+            data:
+                this.safeClone(
+                    data
+                )
+        };
+    }
+
+    async add(
+        type,
+        data = {},
+        metadata = {}
+    ) {
+
+        const record =
+            this.createRecord(
+                type,
+                data,
+                metadata
+            );
+
+        this.records.push(
+            record
+        );
+
+        this.enforceLimit();
+
+        this.updateIndex(
+            record
+        );
+
+        await this.save();
+
+        return record;
+    }
+
+    async addEvent(
+        event = {}
+    ) {
+
+        return this.add(
+            'event',
+            event,
+            {
+
+                source:
+                    event.source ||
+                    'observer',
+
+                player:
+                    event.player ||
+                    event.playerName ||
+                    null,
+
+                location:
+                    event.position ||
+                    event.location ||
+                    null,
+
+                tags:
+                    [
+                        'event',
+                        event.type ||
+                        'unknown'
+                    ]
+            }
+        );
+    }
+
+    async addChat(
+        sender,
+        message,
+        metadata = {}
+    ) {
+
+        return this.add(
+            'chat',
+            {
+
+                sender,
+
+                message,
+
+                channel:
+                    metadata.channel ||
+                    'minecraft',
+
+                timestamp:
+                    Date.now()
+            },
+            {
+
+                source:
+                    metadata.source ||
+                    'minecraft',
+
+                player:
+                    sender,
+
+                tags:
+                    [
+                        'chat',
+                        metadata.channel ||
+                        'minecraft'
+                    ]
+            }
+        );
+    }
+
+    async addObservation(
+        observation,
+        metadata = {}
+    ) {
+
+        return this.add(
+            'observation',
+            observation,
+            {
+
+                source:
+                    metadata.source ||
+                    'observer',
+
+                player:
+                    metadata.player ||
+                    null,
+
+                location:
+                    metadata.location ||
+                    observation.location ||
+                    observation.position ||
+                    null,
+
+                tags:
+                    [
+                        'observation',
+                        ...(metadata.tags || [])
+                    ]
+            }
+        );
+    }
+
+    async addCommand(
+        command,
+        result,
+        metadata = {}
+    ) {
+
+        return this.add(
+            'command',
+            {
+
+                command,
+
+                result,
+
+                success:
+                    result?.success !== false
+            },
+            {
+
+                source:
+                    metadata.source ||
+                    'external',
+
+                player:
+                    metadata.user ||
+                    null,
+
+                tags:
+                    [
+                        'command',
+                        metadata.channel ||
+                        'unknown'
+                    ]
+            }
+        );
+    }
+
+    async remember(
+        text,
+        metadata = {}
+    ) {
+
+        return this.add(
+            'fact',
+            {
+
+                text:
+
+                    String(
+                        text
+                    )
+            },
+            {
+
+                source:
+                    metadata.source ||
+                    'agent',
+
+                importance:
+                    metadata.importance ??
+                    5,
+
+                player:
+                    metadata.player ||
+                    null,
+
+                location:
+                    metadata.location ||
+                    null,
+
+                tags:
+                    [
+                        'memory',
+                        'fact',
+                        ...(metadata.tags || [])
+                    ]
+            }
+        );
+    }
+
+    async forget(
+        id
+    ) {
+
+        const index =
+            this.records.findIndex(
+                record =>
+                    record.id === id
+            );
+
+        if (
+            index === -1
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Xotira topilmadi.'
+            };
+        }
+
+        this.records.splice(
+            index,
+            1
+        );
+
+        this.rebuildIndex();
+
+        await this.save();
+
+        return {
+
+            success: true,
+
+            id
+        };
+    }
+
+    async update(
+        id,
+        patch = {}
+    ) {
+
+        const record =
+            this.records.find(
+                item =>
+                    item.id === id
+            );
+
+        if (
+            !record
+        ) {
+
+            return {
+
+                success: false,
+
+                error:
+                    'Xotira topilmadi.'
+            };
+        }
+
+        if (
+            patch.data &&
+            typeof patch.data ===
+            'object'
+        ) {
+
+            record.data = {
+
+                ...record.data,
+
+                ...this.safeClone(
+                    patch.data
+                )
+            };
+        }
+
+        if (
+            patch.tags
+        ) {
+
+            record.tags =
+                this.normalizeTags(
+                    patch.tags
+                );
+        }
+
+        if (
+            patch.importance !==
+            undefined
+        ) {
+
+            record.importance =
+                Number(
+                    patch.importance
+                );
+        }
+
+        record.updatedAt =
+            Date.now();
+
+        this.rebuildIndex();
+
+        await this.save();
+
+        return record;
+    }
+
+    search(
+        query,
+        options = {}
+    ) {
+
+        const text =
+            String(
+                query ||
+                ''
+            )
+            .trim()
+            .toLowerCase();
+
+        if (!text) {
+
+            return [];
+        }
+
+        const limit =
+            Math.max(
+                1,
+                Number(
+                    options.limit ||
+                    20
+                )
+            );
+
+        const type =
+            options.type ||
+            null;
+
+        const player =
+            options.player ||
+            null;
+
+        const tag =
+            options.tag ||
+            null;
+
+        const results =
+            this.records
+                .filter(
+                    record => {
+
+                        if (
+                            type &&
+                            record.type !== type
+                        ) {
+
+                            return false;
+                        }
+
+                        if (
+                            player &&
+                            String(
+                                record.player ||
+                                ''
+                            ).toLowerCase() !==
+                            String(
+                                player
+                            ).toLowerCase()
+                        ) {
+
+                            return false;
+                        }
+
+                        if (
+                            tag &&
+                            !record.tags.includes(
+                                tag
+                            )
+                        ) {
+
+                            return false;
+                        }
+
+                        const haystack =
+                            JSON.stringify(
+                                record
+                            ).toLowerCase();
+
+                        return haystack.includes(
+                            text
+                        );
+                    }
+                )
+                .map(
+                    record => ({
+
+                        record,
+
+                        score:
+                            this.scoreRecord(
+                                record,
+                                text
+                            )
+                    })
+                )
+                .sort(
+                    (a, b) =>
+                        b.score -
+                        a.score
+                )
+                .slice(
+                    0,
+                    limit
+                );
+
+        return results.map(
+            item =>
+                item.record
+        );
+    }
+
+    scoreRecord(
+        record,
+        query
+    ) {
+
+        let score = 0;
+
+        const serialized =
+            JSON.stringify(
+                record
+            ).toLowerCase();
+
+        const words =
+            query
+                .split(
+                    /\s+/
+                )
+                .filter(
+                    Boolean
+                );
+
+        for (
+            const word of
+            words
+        ) {
+
+            if (
+                serialized.includes(
+                    word
+                )
+            ) {
+
+                score += 1;
+            }
+        }
+
+        score +=
+            Math.min(
+                Number(
+                    record.importance ||
+                    0
+                ),
+                10
+            ) * 0.2;
+
+        const age =
+            Date.now() -
+            Number(
+                record.updatedAt ||
+                record.createdAt ||
+                Date.now()
+            );
+
+        const days =
+            age /
+            86400000;
+
+        /*
+         * Juda eski ma’lumotni biroz pastga tushiramiz,
+         * lekin o‘chirib yubormaymiz.
+         */
+
+        score +=
+            Math.max(
+                0,
+                2 -
+                days * 0.01
+            );
+
+        return score;
+    }
+
+    getRecent(
+        limit = 50,
+        type = null
+    ) {
+
+        let records =
+            this.records;
+
+        if (
+            type
+        ) {
+
+            records =
+                records.filter(
+                    record =>
+                        record.type === type
+                );
+        }
+
+        return records
+            .slice(
+                -Math.max(
+                    1,
+                    Number(limit) || 50
+                )
+            )
+            .reverse();
+    }
+
+    getImportant(
+        limit = 50
+    ) {
+
+        return [
+            ...this.records
+        ]
+            .sort(
+                (a, b) =>
+                    Number(
+                        b.importance || 0
+                    ) -
+                    Number(
+                        a.importance || 0
+                    )
+            )
+            .slice(
+                0,
+                Math.max(
+                    1,
+                    Number(limit) || 50
+                )
+            );
+    }
+
+    getPlayerMemory(
+        player,
+        limit = 100
+    ) {
+
+        const name =
+            String(
+                player
+            ).toLowerCase();
+
+        return this.records
+            .filter(
+                record =>
+                    String(
+                        record.player ||
+                        ''
+                    ).toLowerCase() ===
+                    name
+            )
+            .slice(
+                -Math.max(
+                    1,
+                    Number(limit) || 100
+                )
+            )
+            .reverse();
+    }
+
+    getLocationMemory(
+        location,
+        limit = 100
+    ) {
+
+        if (!location) {
+            return [];
+        }
+
+        const target =
+            this.normalizeLocation(
+                location
+            );
+
+        return this.records
+            .filter(
+                record => {
+
+                    const current =
+                        this.normalizeLocation(
+                            record.location
+                        );
+
+                    if (
+                        !current
+                    ) {
+
+                        return false;
+                    }
+
+                    return (
+                        Math.abs(
+                            current.x -
+                            target.x
+                        ) <=
+                        Number(
+                            location.radius ||
+                            10
+                        ) &&
+
+                        Math.abs(
+                            current.y -
+                            target.y
+                        ) <=
+                        Number(
+                            location.radius ||
+                            10
+                        ) &&
+
+                        Math.abs(
+                            current.z -
+                            target.z
+                        ) <=
+                        Number(
+                            location.radius ||
+                            10
+                        )
+                    );
+                }
+            )
+            .slice(
+                -Math.max(
+                    1,
+                    Number(limit) || 100
+                )
+            )
+            .reverse();
+    }
+
+    getById(
+        id
+    ) {
+
+        return this.records.find(
+            record =>
+                record.id === id
+        ) || null;
+    }
+
+    count(
+        type = null
+    ) {
+
+        if (!type) {
+
+            return this.records.length;
+        }
+
+        return this.records.filter(
+            record =>
+                record.type === type
+        ).length;
+    }
+
+    async clear(
+        options = {}
+    ) {
+
+        if (
+            options.type
+        ) {
+
+            this.records =
+                this.records.filter(
+                    record =>
+                        record.type !==
+                        options.type
+                );
+
+        } else {
+
+            this.records = [];
+        }
+
+        this.rebuildIndex();
+
+        await this.save();
+
+        return {
+
+            success: true,
+
+            count:
+                this.records.length
+        };
+    }
+
+    enforceLimit() {
+
+        if (
+            this.records.length <=
+            this.maxRecords
+        ) {
+
+            return;
+        }
+
+        /*
+         * Muhim ma’lumotlarni imkon qadar saqlab qolamiz.
+         */
+
+        const sorted =
+            [
+                ...this.records
+            ]
+            .sort(
+                (a, b) => {
+
+                    const aScore =
+                        this.memoryValue(
+                            a
+                        );
+
+                    const bScore =
+                        this.memoryValue(
+                            b
+                        );
+
+                    return (
+                        bScore -
+                        aScore
+                    );
+                }
+            );
+
+        this.records =
+            sorted.slice(
+                0,
+                this.maxRecords
+            );
+
+        this.records.sort(
+            (a, b) =>
+                Number(
+                    a.createdAt
+                ) -
+                Number(
+                    b.createdAt
+                )
+        );
+
+        this.rebuildIndex();
+    }
+
+    memoryValue(
+        record
+    ) {
+
+        const importance =
+            Number(
+                record.importance ||
+                0
+            );
+
+        const age =
+            Date.now() -
+            Number(
+                record.updatedAt ||
+                record.createdAt ||
+                Date.now()
+            );
+
+        const days =
+            age /
+            86400000;
+
+        return (
+            importance * 10 +
+            Math.max(
+                0,
+                10 -
+                days * 0.01
+            )
+        );
+    }
+
+    rebuildIndex() {
+
+        this.index = {
+
+            players: {},
+
+            locations: {},
+
+            events: {},
+
+            tags: {}
+        };
+
+        for (
+            const record of
+            this.records
+        ) {
+
+            this.updateIndex(
+                record
+            );
+        }
+    }
+
+    updateIndex(
+        record
+    ) {
+
+        if (
+            record.player
+        ) {
+
+            const key =
+                String(
+                    record.player
+                ).toLowerCase();
+
+            if (
+                !this.index.players[key]
+            ) {
+
+                this.index.players[key] =
+                    [];
+            }
+
+            this.index.players[key].push(
+                record.id
+            );
+        }
+
+        if (
+            record.type
+        ) {
+
+            if (
+                !this.index.events[
+                    record.type
+                ]
+            ) {
+
+                this.index.events[
+                    record.type
+                ] = [];
+            }
+
+            this.index.events[
+                record.type
+            ].push(
+                record.id
+            );
+        }
+
+        for (
+            const tag of
+            record.tags || []
+        ) {
+
+            if (
+                !this.index.tags[tag]
+            ) {
+
+                this.index.tags[tag] =
+                    [];
+            }
+
+            this.index.tags[tag].push(
+                record.id
+            );
+        }
+
+        if (
+            record.location
+        ) {
+
+            const location =
+                this.normalizeLocation(
+                    record.location
+                );
+
+            if (
+                location
+            ) {
+
+                const key =
+                    this.locationKey(
+                        location
+                    );
+
+                if (
+                    !this.index.locations[key]
+                ) {
+
+                    this.index.locations[key] =
+                        [];
+                }
+
+                this.index.locations[key].push(
+                    record.id
+                );
+            }
+        }
+    }
+
+    normalizeLocation(
+        location
+    ) {
+
+        if (!location) {
+            return null;
+        }
+
+        const x =
+            Number(
+                location.x
+            );
+
+        const y =
+            Number(
+                location.y
+            );
+
+        const z =
+            Number(
+                location.z
+            );
+
+        if (
+            !Number.isFinite(x) ||
+            !Number.isFinite(y) ||
+            !Number.isFinite(z)
+        ) {
+
+            return null;
+        }
+
+        return {
+            x,
+            y,
+            z
+        };
+    }
+
+    locationKey(
+        location
+    ) {
+
+        return [
+            Math.floor(
+                location.x / 16
+            ),
+
+            Math.floor(
+                location.y / 16
+            ),
+
+            Math.floor(
+                location.z / 16
+            )
+        ].join(':');
+    }
+
+    normalizeTags(
+        tags
+    ) {
+
+        if (
+            !Array.isArray(tags)
+        ) {
+
+            tags =
+                [tags];
+        }
+
+        return [
+            ...new Set(
+                tags
+                    .filter(
+                        tag =>
+                            tag !==
+                            null &&
+                            tag !==
+                            undefined
+                    )
+                    .map(
+                        tag =>
+                            String(
+                                tag
+                            ).trim()
+                    )
+                    .filter(
+                        Boolean
+                    )
+            )
+        ];
+    }
+
+    safeClone(
+        object
+    ) {
+
+        if (
+            object === undefined
+        ) {
+
+            return null;
+        }
+
+        try {
+
+            return JSON.parse(
+                JSON.stringify(
+                    object
+                )
+            );
+
+        } catch (_) {
+
+            return String(
+                object
+            );
+        }
+    }
+
+    generateId() {
+
+        return (
+            'mem_' +
+            Date.now()
+                .toString(36) +
+            '_' +
+            Math.random()
+                .toString(36)
+                .slice(2, 12)
+        );
+    }
+
+    getStats() {
+
+        const byType = {};
+
+        for (
+            const record of
+            this.records
+        ) {
+
+            byType[
+                record.type
+            ] =
+                (
+                    byType[
+                        record.type
+                    ] ||
+                    0
+                ) + 1;
+        }
+
+        return {
+
+            ready:
+                this.ready,
+
+            total:
+                this.records.length,
+
+            maxRecords:
+                this.maxRecords,
+
+            byType,
+
+            players:
+                Object.keys(
+                    this.index.players
+                ).length,
+
+            tags:
+                Object.keys(
+                    this.index.tags
+                ).length,
+
+            databaseFile:
+                this.databaseFile
+        };
+    }
+}
+
+const memoryStore =
+    new MemoryStore();
+
+module.exports =
+    memoryStore;
+
+module.exports.MemoryStore =
+    MemoryStore;
