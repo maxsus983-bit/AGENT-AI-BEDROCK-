@@ -1,0 +1,31 @@
+name: Minecraft AI Agent
+
+on:
+  workflow_dispatch:
+
+jobs:
+  start-agent:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Repository yuklash
+        uses: actions/checkout@v4
+
+      - name: Node.js o‘rnatish
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Dependencies o‘rnatish
+        run: npm install
+
+      - name: AI Agentni ishga tushirish
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+
+        run: npm start
